@@ -1,0 +1,86 @@
+{
+  "study": "Guida (2025) Machine Learning in Commodity Futures: replication on Chinese commodity futures",
+  "declared_before_results": true,
+  "sample": {
+    "partition": "research",
+    "data_start": "2010-01-04",
+    "data_end": "2021-12-31",
+    "first_test_year": 2016,
+    "last_test_year": 2021,
+    "dates_not_read": "2022-01-01 onward (oos partition)",
+    "warmup_and_training_only": "2010-2015: features and training labels only; the backtest starts 2016-01-04",
+    "sample_change": "first run used 2013-2021 as the test window; corrected to the project research period 2016-2021 before any further analysis"
+  },
+  "universe": {
+    "turnover_window_days": 242,
+    "turnover_min_periods": 60,
+    "min_median_daily_turnover_cny": 500000000,
+    "min_history_days": 130,
+    "require_dominant_volume_positive": true,
+    "excluded_symbols": ["EC"]
+  },
+  "continuous_series": "RiceQuant get_dominant rank1/rank2; daily return = same-contract close-to-close, so roll days carry no price gap (ratio back-adjustment)",
+  "features": {
+    "families": ["MOM", "TSMOM", "CARRY", "BASISMOM", "SKEW", "IVOL", "MA", "RSI", "MAV"],
+    "lookbacks": [10, 22, 44, 66, 88, 130, 200, 252, 300, 382, 400, 504, 600, 756],
+    "definitions": {
+      "MOM": "L-day cumulative return of rank1 series",
+      "TSMOM": "L-day log return divided by (L-day daily log-return std * sqrt(L))",
+      "CARRY": "L-day mean of RiceQuant main_sub annualized roll yield (positive = backwardation)",
+      "BASISMOM": "L-day log return of rank1 leg minus L-day log return of rank2 leg",
+      "SKEW": "L-day skewness of daily returns",
+      "IVOL": "L-day residual volatility against the equal-weight return of eligible symbols",
+      "MA": "back-adjusted price divided by its L-day mean, minus 1",
+      "RSI": "100 * mean gain / (mean gain + mean loss) of daily returns over L days",
+      "MAV": "log of total open interest over its L-day mean"
+    },
+    "min_periods": "L",
+    "normalization": "cross-sectional percentile rank within the eligible universe on each date"
+  },
+  "targets": {
+    "horizons": [5, 10, 22, 44, 66, 88, 100, 200],
+    "definition": "cumulative rank1 return from close t to close t+H, cross-sectional percentile rank",
+    "note": "paper text lists 80d but its tables report 88d; 88d is used"
+  },
+  "model": {
+    "library": "xgboost",
+    "objective": "reg:squarederror",
+    "tree_method": "hist",
+    "reg_lambda": 1.0,
+    "grid": {
+      "max_depth": [1, 2, 3],
+      "learning_rate": [0.05, 0.02, 0.005],
+      "n_estimators": [50, 100, 150],
+      "colsample_bytree": [0.55, 0.7, 0.85],
+      "colsample_bylevel": [0.55, 0.7, 0.85]
+    },
+    "selection": "minimum validation MSE; validation = last 121 feature dates of the training window whose H-day labels are fully realized by the window end",
+    "retrain": "annually at year end on an expanding window starting 2010",
+    "purge": "training-part rows need t+H before the validation start; validation and final-refit rows need t+H no later than the last trading day of the window",
+    "final_fit": "refit on the full window with the selected parameters",
+    "seeds": 5,
+    "seed_deviation": "paper averages 20 seeds; 5 seeds here to bound compute"
+  },
+  "portfolio": {
+    "score": "cross-sectional percentile of the prediction, centered at 0.5",
+    "legs": "long above median, short below median, weights proportional to |score - 0.5|, each leg gross 1",
+    "ensemble": "mean of the eight horizon percentiles, re-ranked",
+    "execution": {
+      "main": "weights from close t earn the return from close t to close t+1 (paper timing)",
+      "robustness": "one-day delay: weights from close t earn close t+1 to close t+2"
+    },
+    "cost_bps_per_unit_turnover": 5,
+    "turnover": "sum |w_t - w_{t-1}| plus 2|w| on each held symbol's dominant-contract roll day",
+    "baselines": {
+      "TSMOM252": 1, "MOM252": 1, "CARRY10": 1, "BASISMOM130": 1, "SKEW130": -1
+    },
+    "baseline_signs": "set from the literature before results; not re-estimated"
+  },
+  "hypotheses_from_paper": [
+    "H1: net performance by horizon is a mirror-J: highest at 5d/10d, lowest around 44-88d, rising toward 200d",
+    "H2: the ensemble has lower volatility and turnover than single horizons with Sharpe in the upper range",
+    "H3: mid horizons (22d-100d) are highly correlated with each other; 200d is the least correlated",
+    "H4: TSMOM and MOM rank among the most important features; SKEW is more important at short horizons; RSI, MA and MAV rank low"
+  ],
+  "reporting": "report every horizon, the ensemble, both timings, gross and net, and all baselines, including null and adverse results"
+}

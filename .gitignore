@@ -11,11 +11,9 @@ config/rqdata.env
 *.pem
 *.key
 
-# 原始行情和中间面板留在本地
+# 原始行情、中间面板与研究运行产物留在本地
 /data/
-/runs/research/panel/
-/runs/research/replication/tasks/
-/runs/research/*.log
+/runs/
 /docs/*.pdf
 /docs/paper_text.txt
 .DS_Store

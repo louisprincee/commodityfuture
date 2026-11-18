@@ -15,7 +15,7 @@ config/rqdata.env
 /data/
 /runs/
 /docs/*.pdf
-/docs/paper_text.txt
+/docs/*_text.txt
 .DS_Store
 .vscode/
 *.zip

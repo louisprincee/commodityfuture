@@ -1,8 +1,8 @@
-"""下载商品期货逐合约日行情、主力/次主力映射、主次展期收益、仓单和现货基准。
+"""下载商品期货逐合约日行情、主力/次主力映射、主次展期收益、仓单、现货基准与会员持仓排名。
 
     python -m download.getExternal --start-date 20100101 --end-date 20251231
 
-研究期（至 2021-12-31）写入 data/external_rqdata/，2022–2025 写入其 oos/ 子目录；
+研究期写入 data/research/daily/，2022–2025 写入 data/oos/daily/；
 每个数据项在 coverage.json 记录已覆盖区间，重跑只补缺口。
 """
 from __future__ import annotations
@@ -30,28 +30,17 @@ PRICE_FIELDS = [
     "open", "high", "low", "close", "settlement", "prev_settlement",
     "volume", "total_turnover", "open_interest",
 ]
-DATASETS = ("contracts", "dominant", "roll_yield", "warehouse", "spot")
+DATASETS = ("contracts", "dominant", "roll_yield", "warehouse", "spot",
+            "member_rank", "member_rank_contracts")
+# 会员排名：品种级取多、空、成交三张榜；合约级只取多、空两张，用于确定每日入榜合约与分合约持仓
+MEMBER_SIDES = ("long", "short", "volume")
+MEMBER_CONTRACT_SIDES = ("long", "short")
 SPOT_BENCHMARKS = ["AU9999.SGEX", "AG9999.SGEX"]
 MANIFEST_FLUSH_EVERY = 100
-PARTITIONS = (
-    ("research", date(1900, 1, 1), C.RESEARCH_END),
-    ("oos", C.OOS_START, C.DEFAULT_OOS_END),
-)
 
 
 def parse_day(value: str) -> date:
     return pd.Timestamp(value).date()
-
-
-def split_period(start: date, end: date) -> list[tuple[str, date, date]]:
-    """把请求的时间段切到仓库里互相隔离的时间分区。"""
-    result = []
-    for name, partition_start, partition_end in PARTITIONS:
-        left = max(start, partition_start)
-        right = min(end, partition_end)
-        if left <= right:
-            result.append((name, left, right))
-    return result
 
 
 def missing_ranges(start: date, end: date,
@@ -107,8 +96,7 @@ def remove_unavailable_cache(root: Path) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     removed = 0
     for key in list(manifest.get("items", {})):
-        unavailable = (key.startswith("member_rank/")
-                       or key.endswith("_front_month")
+        unavailable = (key.endswith("_front_month")
                        or key.endswith("_next_month")
                        or key.endswith("_near_main"))
         if not unavailable:
@@ -228,6 +216,21 @@ class CoverageCache:
             self._save_manifest()
 
 
+def member_rank(rq, obj: str, side: str, left: str, right: str) -> pd.DataFrame:
+    """前 20 名会员排名；无排名返回空表。索引为 (trading_date, member_name)，保证缓存合并时不被去重。"""
+    frame = rq.futures.get_member_rank(obj, start_date=left, end_date=right, rank_by=side)
+    columns = ["commodity_id", "rank", "volume", "volume_change"]
+    if frame is None or len(frame) == 0:
+        index = pd.MultiIndex.from_arrays([pd.DatetimeIndex([]), pd.Index([], dtype=object)],
+                                          names=["trading_date", "member_name"])
+        return pd.DataFrame(columns=columns, index=index)
+    out = frame.reset_index()
+    out["trading_date"] = pd.to_datetime(out["trading_date"]).dt.normalize()
+    if out.duplicated(["trading_date", "member_name"]).any():
+        raise ValueError(f"{obj} {side} 同日会员重复")
+    return out.set_index(["trading_date", "member_name"])[columns].sort_index()
+
+
 def commodity_instruments(rq, symbols: list[str] | None) -> tuple[list[str], pd.DataFrame]:
     instruments = rq.all_instruments(type="Future")
     if "product" not in instruments or "underlying_symbol" not in instruments:
@@ -266,7 +269,8 @@ def trading_in(instruments: pd.DataFrame, start: date, end: date) -> pd.DataFram
 
 
 def run_download(rq, cache: CoverageCache, start: date, end: date,
-                 symbols: list[str] | None, datasets: set[str]) -> None:
+                 symbols: list[str] | None, datasets: set[str],
+                 contract_rank_sides: tuple[str, ...] = MEMBER_CONTRACT_SIDES) -> None:
     selected, instruments = commodity_instruments(rq, symbols)
     start_s, end_s = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
@@ -280,7 +284,21 @@ def run_download(rq, cache: CoverageCache, start: date, end: date,
                             frequency="1d", fields=PRICE_FIELDS,
                             adjust_type="none"))
 
+    if "member_rank_contracts" in datasets:
+        contracts = trading_in(instruments, start, end)["order_book_id"].astype(str).tolist()
+        for contract in tqdm(contracts, desc="逐合约会员排名"):
+            for side in contract_rank_sides:
+                cache.fetch("member_rank_contracts", f"{contract}_{side}", start, end,
+                            lambda left, right, contract=contract, side=side:
+                            member_rank(rq, contract, side, left, right))
+
     for symbol in tqdm(selected, desc="商品品种"):
+        if "member_rank" in datasets:
+            for side in MEMBER_SIDES:
+                cache.fetch("member_rank", f"{symbol}_{side}", start, end,
+                            lambda left, right, symbol=symbol, side=side:
+                            member_rank(rq, symbol, side, left, right))
+
         if "dominant" in datasets:
             for rank in (1, 2):
                 cache.fetch(
@@ -324,8 +342,10 @@ def main() -> int:
                         help="商品品种代码，默认 all（与 all1m 商品池取交集）")
     parser.add_argument("--datasets", nargs="+", choices=DATASETS, default=list(DATASETS),
                         help="选择接口数据集，默认全部")
-    parser.add_argument("--datapath", default=str(C.EXTERNAL_DIR),
-                        help="数据缓存根目录；研究期和 OOS 分开保存")
+    parser.add_argument("--contract-rank-sides", nargs="+", choices=MEMBER_SIDES,
+                        default=MEMBER_CONTRACT_SIDES, help="合约级榜单类型，默认 long short")
+    parser.add_argument("--datapath", type=Path, default=C.DATA_ROOT,
+                        help="数据根目录，分别写入 research/daily 和 oos/daily")
     parser.add_argument("--dry-run", action="store_true", help="显示缺失区间，不调用数据接口")
     args = parser.parse_args()
 
@@ -340,6 +360,9 @@ def main() -> int:
     if end > date.today():
         parser.error("结束日期不能晚于今天")
 
+    periods = C.split_period(start, end)
+    if not periods:
+        parser.error("日期窗口与已登记数据分区没有交集")
     requested_symbols = None if args.symbols == ["all"] else [s.upper() for s in args.symbols]
     credentials = rqdata_credentials()
     if credentials is None:
@@ -348,21 +371,24 @@ def main() -> int:
     import rqdatac as rq
 
     rq.init(*credentials)
-    output_root = Path(args.datapath)
-    periods = split_period(start, end)
+    output_root = args.datapath
     try:
         failures = []
         for partition, left, right in periods:
             print(f"\n时间分区: {partition} ({left:%Y%m%d}-{right:%Y%m%d})")
-            partition_root = output_root if partition == "research" else output_root / partition
-            removed = remove_unavailable_cache(partition_root)
+            partition_root = C.daily_dir(partition, output_root)
+            if partition == "research":
+                C.assert_research_only(partition_root)
+            removed = 0 if args.dry_run else remove_unavailable_cache(partition_root)
             if removed:
                 print(f"清理不可用接口缓存项: {removed}")
             cache = CoverageCache(partition_root, dry_run=args.dry_run)
             try:
-                run_download(rq, cache, left, right, requested_symbols, set(args.datasets))
+                run_download(rq, cache, left, right, requested_symbols, set(args.datasets),
+                             tuple(dict.fromkeys(args.contract_rank_sides)))
             finally:
-                cache.flush()
+                if not args.dry_run:
+                    cache.flush()
             failures.extend(cache.failures)
     except Exception as exc:
         print(f"下载中断: {type(exc).__name__}: {exc}", file=sys.stderr)

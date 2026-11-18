@@ -8,9 +8,6 @@
 from __future__ import annotations
 
 import json
-import os
-import re
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,8 +16,7 @@ import config as C
 import data as D
 
 OUT = C.study_dir("data_check")
-WINDOWS = {"research": (C.RESEARCH_START, C.RESEARCH_END), "oos": (C.OOS_START, C.DEFAULT_OOS_END)}
-SHARD_DIRS = {"research": C.RESEARCH_SHARD_DIR, "oos": C.OOS_SHARD_DIR}
+WINDOWS = C.PARTITION_WINDOWS
 FEE_PATHS = {"research": C.RESEARCH_FEE_PATH, "oos": C.OOS_FEE_PATH}
 # 郑商所更名品种：更名前的历史在米筐使用旧代码，本地数据不含
 CZCE_RENAMED = {"MA": "ME", "ZC": "TC", "OI": "RO", "WH": "WS", "RI": "ER"}
@@ -39,7 +35,10 @@ class Report:
 
 def check_manifest(rep: Report, partition: str) -> None:
     root = D.external_root(partition)
-    items = json.loads((root / "coverage.json").read_text(encoding="utf-8"))["items"]
+    path = root / "coverage.json"
+    if partition == "research":
+        C.assert_research_only(path)
+    items = json.loads(path.read_text(encoding="utf-8"))["items"]
     lo, hi = (d.strftime("%Y%m%d") for d in WINDOWS[partition])
     empty, missing_file, short = [], [], []
     for key, entry in items.items():
@@ -89,7 +88,34 @@ def check_contracts(rep: Report, partition: str) -> pd.DataFrame:
     rep.add(partition, "量/持仓非负", neg == 0, f"负值行 {int(neg)}")
     na_close = c.close.isna().sum()
     rep.add(partition, "收盘价缺失", na_close == 0, f"{int(na_close)} 行")
+    if partition == "research":
+        check_units(rep)
     return c
+
+
+def check_units(rep: Report) -> None:
+    """原始日线在 2020-01-01 前为双边口径：量与持仓均为偶数，跨年处整体减半；折半后应连续。"""
+    raw = D.load_contracts("research", raw_units=True)
+    before = raw["date"] < pd.Timestamp(C.SINGLE_SIDED_FROM)
+    odd = {}
+    for col in ("open_interest", "volume"):
+        nz = raw[col] > 0
+        odd[col] = (float(((raw[col] % 2 != 0) & nz & before).sum() / max((nz & before).sum(), 1)),
+                    float(((raw[col] % 2 != 0) & nz & ~before).sum() / max((nz & ~before).sum(), 1)))
+    total = raw.groupby(["symbol", "date"])["open_interest"].sum().unstack(0)
+    d0, d1 = pd.Timestamp("2019-12-31"), pd.Timestamp("2020-01-02")
+    both = total.loc[[d0, d1]].dropna(axis=1)
+    both = both.loc[:, both.loc[d0] > 0]
+    ratio = (both.loc[d1] / both.loc[d0]).median()
+    fixed = D.to_single_sided(raw)
+    fixed_total = fixed.groupby(["symbol", "date"])["open_interest"].sum().unstack(0)
+    fixed_ratio = (fixed_total.loc[d1, both.columns] / fixed_total.loc[d0, both.columns]).median()
+    ok = odd["open_interest"][0] == 0 and odd["volume"][0] == 0 and 0.4 < ratio < 0.6 and 0.8 < fixed_ratio < 1.2
+    rep.add("research", "持仓/成交量单双边口径", ok,
+            f"2020 年前持仓、成交量奇数占比 {odd['open_interest'][0]:.3f} / {odd['volume'][0]:.3f}，"
+            f"之后 {odd['open_interest'][1]:.3f} / {odd['volume'][1]:.3f}；"
+            f"{len(both.columns)} 个品种 2020-01-02 对 2019-12-31 总持仓比中位 {ratio:.2f}，折半后 {fixed_ratio:.2f}。"
+            "研究读取统一折半为单边口径", level="info" if ok else None)
 
 
 def check_dominant(rep: Report, partition: str, contracts: pd.DataFrame) -> pd.DataFrame:
@@ -164,14 +190,18 @@ def check_roll_yield(rep: Report, partition: str) -> None:
 
 
 def check_shards(rep: Report, partition: str, contracts: pd.DataFrame) -> None:
-    root = SHARD_DIRS[partition]
+    root = C.minute_dir(partition)
     lo, hi = WINDOWS[partition]
     px = contracts.set_index(["contract", "date"])
     stats = []
     for path in sorted(root.glob("*.parquet")):
         symbol = path.stem
+        if partition == "research":
+            C.assert_research_only(path)
         m = pd.read_parquet(path, columns=["close", "trading_date"])
         td = pd.to_datetime(m.trading_date)
+        if partition == "research":
+            C.assert_no_holdout_dates(td, f"{symbol} 研究期分钟")
         r1 = D.load_dominant(symbol, 1, partition)
         last = m.groupby("trading_date")["close"].last()
         last.index = pd.to_datetime(last.index)
@@ -205,13 +235,28 @@ def check_shards(rep: Report, partition: str, contracts: pd.DataFrame) -> None:
 
 def check_fees(rep: Report, partition: str, dominant: pd.DataFrame) -> None:
     path = FEE_PATHS[partition]
+    if partition == "research":
+        C.assert_research_only(path)
     if not path.exists():
         rep.add(partition, "手续费表", False, f"缺失 {path}")
         return
     fee = pd.read_csv(path, parse_dates=["trading_date"])
+    if partition == "research":
+        C.assert_no_holdout_dates(fee.trading_date, "研究期手续费")
     lo, hi = WINDOWS[partition]
     rep.add(partition, "手续费表日期", fee.trading_date.min() >= pd.Timestamp(lo) and fee.trading_date.max() <= pd.Timestamp(hi),
             f"{len(fee)} 行，{fee.symbol.nunique()} 品种，{fee.trading_date.min().date()}..{fee.trading_date.max().date()}")
+    spec_fields = {"contract_multiplier", "tick_size"}
+    missing_specs = spec_fields - set(fee.columns)
+    if missing_specs:
+        rep.add(partition, "手续费成本规格字段", False, f"缺少 {sorted(missing_specs)}",
+                level="warn")
+    else:
+        multiplier = pd.to_numeric(fee["contract_multiplier"], errors="coerce")
+        tick = pd.to_numeric(fee["tick_size"], errors="coerce")
+        bad_specs = int((multiplier.isna() | multiplier.le(0) | tick.isna() | tick.le(0)).sum())
+        rep.add(partition, "手续费成本规格有效", bad_specs == 0,
+                f"无效合约乘数或 tick 行数 {bad_specs}", level="warn" if bad_specs else None)
     missing = []
     for symbol in dominant.loc[dominant.status == "ok", "symbol"]:
         days = D.load_dominant(symbol, 1, partition).index
@@ -240,6 +285,95 @@ def check_research_jumps(rep: Report, contracts: pd.DataFrame) -> None:
             f"{len(t)} 次：{t.head(8).to_dict('records')}", level="info" if len(t) < 30 else "warn")
 
 
+def check_member_rank(rep: Report, contracts: pd.DataFrame) -> None:
+    """研究期会员排名：覆盖、入榜人数、占比上限、品种与合约级一致性、持仓变化字段与名称清单。"""
+    root = C.daily_dir("research") / "member_rank"
+    if not root.exists():
+        rep.add("research", "会员排名", False, f"缺失 {root}")
+        return
+    cov, daily_parts, names, consistency, change = [], [], [], [], []
+    for symbol in D.symbols_with_data("research"):
+        r1 = D.load_dominant(symbol, 1, "research")
+        if r1.empty:
+            continue
+        daily = D.member_rank_daily(symbol, contracts, "research")
+        ranks = D.load_member_rank(symbol, "research")
+        row = {"symbol": symbol, "exchange_days": len(r1), "first_dominant": r1.index.min().date()}
+        if daily.empty:
+            cov.append({**row, "ranked_days": 0})
+            continue
+        days = set(daily.trading_date)
+        row.update({"ranked_days": int(len(days & set(r1.index))),
+                    "first_ranked": daily.trading_date.min().date(),
+                    "short_lists": int((daily[["n_long", "n_short"]].min(axis=1) < 20).sum()),
+                    "no_contract_detail": int(daily["n_ranked_contracts"].isna().sum())
+                    if "n_ranked_contracts" in daily else len(daily)})
+        cov.append(row)
+        daily_parts.append(daily)
+        names.append(ranks[["member_name", "trading_date"]])
+        # 品种级会员持仓 ≥ 该会员各入榜合约持仓之和（合约级只含前 20 名，可小于品种级）
+        by_contract = D.load_member_rank_contracts(symbol, "research")
+        if not by_contract.empty:
+            c_sum = by_contract.groupby(["trading_date", "side", "member_name"])["volume"].sum()
+            s = ranks[ranks.side.isin(["long", "short"])].set_index(["trading_date", "side", "member_name"])["volume"]
+            j = pd.concat([s, c_sum.reindex(s.index)], axis=1, keys=["symbol", "contracts"]).dropna()
+            consistency.append({"symbol": symbol, "pairs": len(j),
+                                "equal": int(np.isclose(j.symbol, j.contracts).sum()),
+                                "symbol_below_contracts": int((j.symbol < j.contracts - 0.5).sum())})
+        # 持仓变化字段：连续两日在榜的会员，volume_t - volume_{t-1} 应等于 volume_change
+        held = ranks[ranks.side.isin(["long", "short"])].sort_values(["side", "member_name", "trading_date"])
+        prev_day = pd.Series(sorted(days)).shift(1)
+        prev_map = dict(zip(sorted(days), prev_day))
+        held = held.assign(prev_date=held.trading_date.map(prev_map))
+        lag = held.groupby(["side", "member_name"])[["trading_date", "volume"]].shift(1)
+        ok_pair = lag["trading_date"].eq(held["prev_date"])
+        diff = held["volume"] - lag["volume"]
+        change.append({"symbol": symbol, "pairs": int(ok_pair.sum()),
+                       "match": int((ok_pair & np.isclose(diff, held["volume_change"])).sum())})
+    cov = pd.DataFrame(cov)
+    cov["coverage"] = cov["ranked_days"] / cov["exchange_days"]
+    cov.to_csv(OUT / "member_rank_coverage.csv", index=False)
+    daily = pd.concat(daily_parts, ignore_index=True)
+    daily["long_share_ranked"] = daily["top20_long"] / daily["ranked_oi"]
+    daily["short_share_ranked"] = daily["top20_short"] / daily["ranked_oi"]
+    daily["long_share_total"] = daily["top20_long"] / daily["total_oi"]
+    daily.to_csv(OUT / "member_rank_daily.csv", index=False)
+    low = cov.loc[cov.coverage < 0.95, ["symbol", "first_dominant", "first_ranked", "coverage"]]
+    rep.add("research", "会员排名覆盖（主力日）", True,
+            f"{len(cov)} 品种，覆盖率中位 {cov.coverage.median():.3f}；低于 95% 的品种 "
+            f"{low.round(3).astype(str).values.tolist()}", level="info" if len(low) else None)
+    rep.add("research", "会员排名不足 20 名的日子", True,
+            f"{int(cov.short_lists.sum())} 个品种日", level="info")
+    total_share = daily[["top20_long", "top20_short"]].max(axis=1) / daily["total_oi"]
+    over_total = int((total_share > 1.0 + 1e-9).sum())
+    rep.add("research", "前 20 名持仓 / 全品种单边持仓 ≤ 1", over_total == 0,
+            f"超过 1 的品种日 {over_total}，最大 {total_share.max():.3f}；多头占比中位 "
+            f"{(daily.top20_long / daily.total_oi).median():.3f}，空头 {(daily.top20_short / daily.total_oi).median():.3f}")
+    share = daily[["long_share_ranked", "short_share_ranked"]].max(axis=1)
+    over = daily[share > 1.0 + 1e-9]
+    rep.add("research", "合约级排名明细覆盖", True,
+            f"以入榜合约持仓为分母时占比超过 1 的品种日 {len(over)}（{over.symbol.value_counts().head(6).to_dict()}），"
+            "原因是米筐合约级排名缺少部分郑商所合约（含主力），分母偏小；品种级排名不受影响，研究使用品种级排名与全品种持仓",
+            level="warn" if len(over) else "info")
+    jump = daily.set_index("trading_date").groupby("symbol")["long_share_ranked"]
+    d0, d1 = pd.Timestamp("2019-12-31"), pd.Timestamp("2020-01-02")
+    ratios = [s.get(d1) / s.get(d0) for _, s in jump if d0 in s.index and d1 in s.index]
+    rep.add("research", "跨 2020 口径切换的占比连续性", 0.8 < np.nanmedian(ratios) < 1.25,
+            f"{len(ratios)} 个品种 2020-01-02 对 2019-12-31 多头占比之比中位 {np.nanmedian(ratios):.2f}")
+    cons = pd.DataFrame(consistency)
+    below = int(cons.symbol_below_contracts.sum())
+    rep.add("research", "品种级会员持仓 ≥ 合约级之和", below <= 0.01 * cons.pairs.sum(),
+            f"{int(cons.pairs.sum())} 个会员日，相等 {cons.equal.sum() / cons.pairs.sum():.3f}，"
+            f"品种级小于合约级 {below}", level="warn" if below else None)
+    ch = pd.DataFrame(change)
+    rep.add("research", "持仓变化字段 = 相邻两日持仓差", True,
+            f"{int(ch.pairs.sum())} 个连续在榜会员日，一致 {ch.match.sum() / max(ch.pairs.sum(), 1):.3f}", level="info")
+    inv = pd.concat(names).groupby("member_name")["trading_date"].agg(["min", "max", "count"])
+    inv.sort_values("count", ascending=False).to_csv(OUT / "member_names.csv", encoding="utf-8-sig")
+    rep.add("research", "会员名称清单", True,
+            f"{len(inv)} 个名称；更名与合并未处理，清单见 member_names.csv", level="info")
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     rep = Report()
@@ -257,6 +391,7 @@ def run() -> int:
         check_fees(rep, partition, dominant)
         if partition == "research":
             check_research_jumps(rep, contracts)
+            check_member_rank(rep, contracts)
         del contracts
     table = pd.DataFrame(rep.rows)
     table.to_csv(OUT / "checks.csv", index=False, encoding="utf-8-sig")

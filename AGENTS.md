@@ -4,27 +4,29 @@ Read before changes. If instructions conflict with code, establish the intended 
 
 ## Scope
 
-Chinese commodity futures only. Financial futures (IF, IH, IC, IM, T, TF, TS, TL) are excluded from download, data checks and research; `src/config.py` lists them only so scripts can reject them. The current study is the replication of Guida (2025), "Machine Learning in Commodity Futures" (`docs/` holds the PDF locally). Nothing here is a proven deployable edge.
+Chinese commodity futures only. Financial futures (IF, IH, IC, IM, T, TF, TS, TL) are excluded from download, data checks and research. `src/config.py` lists them only so scripts can reject them. The active study computes the Xingye crowding/consistency and Kaiyuan spider-web indicators by commodity and trading date, then measures each factor's time-series rank IC within that commodity. The earlier cross-sectional and execution studies are kept in `research/experiments/` for reproduction. The earlier Guida machine-learning replication has been removed from the code.
 
 ## Samples
 
-Research data run from 2010-01-04 to 2021-12-31. Backtests and every reported statistic start 2016-01-04; 2010–2015 serve only as feature warm-up and training data. Named OOS is 2022-01-01 to 2025-12-31 and is stored separately under `data/external_rqdata/oos/`, `data/minute_shards/oos/` and `data/oos/`. Research loaders must call `assert_research_only` before opening a path and `assert_no_holdout_dates` on loaded dates; keep both and `HoldoutViolation` in `src/config.py`. `python -m research check` may read OOS files for structure and coverage only; it computes no return statistics on OOS. Reading OOS for model evaluation requires an explicit user decision and a new declared protocol.
+Research data run from 2010-01-04 to 2021-12-31 under `data/research/`. Backtests and every reported statistic start 2016-01-04. The 2010–2015 period serves only as feature warm-up and training data. Named OOS is 2022-01-01 to 2025-12-31 under `data/oos/`. Both partitions use `minute/`, `daily/`, and `execution/`. Research loaders must call `assert_research_only` before opening a path and `assert_no_holdout_dates` on loaded dates. Keep both and `HoldoutViolation` in `src/config.py`. The path guard excludes all of `data/oos/` and `data/_archive/`. `python -m research check` may read OOS files for structure and coverage only and computes no return statistics on OOS. Reading OOS for model evaluation requires an explicit user decision and a new declared protocol.
 
 ## Research protocol
 
-`config/research/replication.json` is the declared protocol for the first specification (daily rebalancing, paper construction); `config/research/holding_aligned.json` is a posthoc second specification that holds each daily book for H days, uses the saved predictions unchanged, and must be described as posthoc. replication.json fixes: universe rule, 126 features, eight horizons, model grid, purge, portfolio construction, costs, baselines and hypotheses. It was fixed before results. Do not change signs, thresholds, features or the grid after seeing returns; a changed rule needs a new protocol file and must be reported as a separate, later specification. Report every declared result, including null and adverse findings.
+The `member-ic` study uses the t+1 dominant contract's opening price on t+1 and the same contract's opening price on t+2. It reports all research commodities with a daily panel and applies no cross-sectional liquidity filter or portfolio construction. Inputs through t determine the factor. Missing factor/label pairs are excluded, and neutral event signals retain their zero values.
 
-Features at close t use only data through close t. Labels are forward returns from close t to close t+H. Training rows must have their label window end inside the training window; validation rows are the last 121 feature dates whose labels are realized. Annual retraining predicts the following calendar year only. Portfolio weights from close t earn the return from close t to close t+1 (paper timing); the one-day-delay variant is always reported beside it. Turnover includes dominant-contract roll trades.
+`research/settings.py` `XS_POSITION` fixes the liquidity universe, factor signs, windows, composite members, cost and the 2016-01-04 evaluation start before results. Commodity crowding is a reversal; consistency, the change in top-20 net-long share, and member position flow are momentum. The later blocks in that dict — five-day overlap, within-symbol z-scores, the 20% tails, the rank band, and the 10- and 60-day overlaps — are separate specifications and are not retuned after their own results. Do not change signs, windows or the composite after seeing returns; a changed rule is a separate, later specification. Report every declared book, including null and adverse findings.
+
+Factors at close t use only member ranks and prices through close t. Weights from close t earn the dominant contract's open-to-open return from the next session; the one-extra-day delay is always reported beside it. Turnover includes dominant-contract roll trades. 2010–2015 are warm-up for trailing percentiles only and are not used to choose factors.
 
 ## Data
 
-Raw minutes, contract pickles, panels and model caches remain in local `data/` and `runs/research/panel/`, excluded from Git, as is `config/rqdata.env`. Never print, commit or move RiceQuant credentials. Download scripts in `download/` write the existing layout: `getMinutes.py` (minute monolith), `getExternal.py` (per-contract daily bars, rank1/rank2 dominant maps, roll yield, warehouse, spot), `getFeeHistory.py` (exchange fees). Daily research uses per-contract daily bars; the 88 minute series is not used for daily returns because its last-bar close differs from the daily close on about 1% of days.
+Raw market files, panels and model caches remain in local `data/` and `runs/research/panel/`, excluded from Git, as is `config/rqdata.env`. Never print, commit or move RiceQuant credentials. In each partition, `getMinutes.py` writes per-symbol Parquet to `minute/`, `getExternal.py` writes daily bars, dominant maps and rankings to `daily/`, and `getFeeHistory.py` writes exchange fees to `execution/`. In the research partition, `getExecutionParameters.py` writes trading parameters and price limits to `execution/parameters/`. The mixed-period minute monolith belongs in `data/_archive/minute_monolith/`. Daily research uses per-contract daily bars. The 88 minute last-bar close differs from the daily close on about 1% of research days.
 
 Known data limits, documented in `runs/research/data_check/checks.csv`: CZCE products renamed after 2012 (MA, ZC, OI, WH, RI) lack pre-rename history; SHFE and some CZCE fees are missing before 2013–2015; a few delivery-month rows have high/low inconsistent with close.
 
 ## Files and validation
 
-`docs/research.md` is the single hand-maintained report. Its tables must match the saved CSVs in `runs/research/replication/`; update both together when results change. Match the existing concise Chinese comments and English identifiers. Docstrings, comments and documents use formal research wording; do not name the audience or the person requesting a change. No new dependencies without asking. Keep focused synthetic tests in `tests/test_core.py`; tests never read real data.
+`docs/research.md` is the single hand-maintained report. Its tables must match the saved CSVs in `runs/research/member_ic/` and `runs/research/xs_position/`. Update both together when results change. Match the existing concise Chinese comments and English identifiers. Docstrings, comments and documents use formal research wording and omit the audience or person requesting a change. No new dependencies without asking. Keep focused synthetic tests in `tests/test_core.py`. Tests never read real data.
 
 The repository tracks `origin` (github.com/louisprincee/commodityfuture). Do not create branches or commit/push unless explicitly requested; when asked, stage only in-scope files and never `data/`, `config/rqdata.env`, `docs/*.pdf` or model caches.
 
@@ -32,15 +34,14 @@ Use PYTHONDONTWRITEBYTECODE=1 and pytest -p no:cacheprovider. After checks, dele
 
 ## Commands
 
-The project runs in the `factor-mining` conda environment (Python 3.12, xgboost installed there).
+The project runs in the `factor-mining` conda environment (Python 3.12).
 
 ```bash
 python -m pytest tests -p no:cacheprovider
 python -m research check
 python -m research panel
-python -m research train --jobs 10
-python -m research report
-python -m research holding
+python -m research member-ic --jobs 8
+python -m research event-timing --jobs 8
 python -m download.getExternal --start-date 20100101 --end-date 20251231
 python -m download.getFeeHistory --partition research
 python -m download.getMinutes -t 20100101-20251231

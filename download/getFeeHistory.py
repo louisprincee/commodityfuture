@@ -1,10 +1,11 @@
-"""按主力合约逐日下载商品期货交易所手续费，写成 fee_history.csv。
+"""按主力合约逐日下载商品期货手续费与成本换算所需规格，写成 fee_history.csv。
 
     python -m download.getFeeHistory --partition research
     python -m download.getFeeHistory --partition oos
 
-研究期写 data/research/fee_history.csv，2022–2025 写 data/oos/fee_history.csv。
-米筐上期所历史手续费从 2013-10-08 起才有，此前缺失，读取方须显式处理。
+写入 data/{research,oos}/execution/fee_history.csv。
+保存历史手续费、合约乘数与合约最小变动价位。米筐部分交易所早期手续费缺失，
+读取方须显式处理；tick 情景不等同于盘口价差或冲击成本。
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ import config as C  # noqa: E402
 from rq_auth import rqdata_credentials  # noqa: E402
 
 FIELDS = ["commission_type", "open_commission", "close_commission", "close_commission_today"]
-WINDOWS = {"research": ("20100101", "20211231"), "oos": ("20220101", "20251231")}
+WINDOWS = {partition: tuple(day.strftime("%Y%m%d") for day in bounds)
+           for partition, bounds in C.PARTITION_WINDOWS.items()}
 PATHS = {"research": C.RESEARCH_FEE_PATH, "oos": C.OOS_FEE_PATH}
 
 
@@ -28,6 +30,14 @@ def one_symbol(rq, symbol: str, start: str, end: str) -> pd.DataFrame | None:
     dominant = rq.futures.get_dominant(symbol, start, end)
     if dominant is None or dominant.empty:
         return None
+    multiplier = rq.futures.get_contract_multiplier(symbol, start, end)
+    if multiplier is None or multiplier.empty:
+        raise ValueError(f"{symbol} 缺少历史合约乘数")
+    multiplier = multiplier.reset_index()
+    multiplier["date"] = pd.to_datetime(multiplier["date"]).dt.normalize()
+    multiplier = multiplier.set_index("date")["contract_multiplier"].sort_index()
+    multiplier = multiplier[~multiplier.index.duplicated(keep="last")]
+
     parts = []
     for contract, days in dominant.groupby(dominant):
         days = pd.to_datetime(days.index)
@@ -43,8 +53,31 @@ def one_symbol(rq, symbol: str, start: str, end: str) -> pd.DataFrame | None:
     out = out.dropna(subset=["commission_type", "open_commission", "close_commission"])
     if out.empty:
         return None
+    out["trading_date"] = pd.to_datetime(out["trading_date"]).dt.normalize()
+    multiplier = multiplier.reindex(
+        multiplier.index.union(out["trading_date"])
+    ).sort_index().ffill()
+    out["contract_multiplier"] = multiplier.reindex(out["trading_date"]).to_numpy()
+    if out["contract_multiplier"].isna().any():
+        raise ValueError(f"{symbol} 手续费日期缺少历史合约乘数")
+    contracts = out["contract"].drop_duplicates().tolist()
+    instruments = rq.instruments(contracts)
+    if not isinstance(instruments, (list, tuple)):
+        instruments = [instruments]
+    tick_sizes = {}
+    for instrument in instruments:
+        contract = instrument.order_book_id
+        tick_size = instrument.tick_size()
+        if tick_size is None or tick_size <= 0:
+            raise ValueError(f"{contract} 缺少有效最小变动价位")
+        tick_sizes[contract] = float(tick_size)
+    if set(tick_sizes) != set(contracts):
+        raise ValueError(f"{symbol} 期货合约规格返回不完整")
+    out["tick_size"] = out["contract"].map(tick_sizes)
     out.insert(0, "symbol", symbol)
-    return out.sort_values("trading_date")[["symbol", "trading_date", "contract", *FIELDS]]
+    return out.sort_values("trading_date")[
+        ["symbol", "trading_date", "contract", *FIELDS, "contract_multiplier", "tick_size"]
+    ]
 
 
 def main() -> int:

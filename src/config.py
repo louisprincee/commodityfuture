@@ -10,26 +10,55 @@ DATA_ROOT = Path(_os.environ.get("CF_DATA_ROOT", PROJECT_ROOT / "data"))
 RUNS_DIR = Path(_os.environ.get("CF_RUNS_ROOT", PROJECT_ROOT / "runs"))
 CONFIG_DIR = Path(_os.environ.get("CF_CONFIG_DIR", PROJECT_ROOT / "config"))
 
-# 分钟单体 pickle（扩展名 .txt，内容为 pickle），由 download/getMinutes.py 生成
-MINUTE_RAW_DIR = DATA_ROOT / "data_min"
-MINUTE_MONOLITH = MINUTE_RAW_DIR / "future_all1mdata_20100101-20251231.txt"
-SHARD_ROOT = DATA_ROOT / "minute_shards"
-RESEARCH_SHARD_DIR = SHARD_ROOT / "research"
-OOS_SHARD_DIR = SHARD_ROOT / "oos"
-ROLL_DIR = DATA_ROOT / "roll_dates"
-UNIVERSE_DIR = DATA_ROOT / "universe"
+PARTITIONS = ("research", "oos")
+ARCHIVE_DIR = DATA_ROOT / "_archive"
+MINUTE_MONOLITH = ARCHIVE_DIR / "minute_monolith" / "future_all1mdata_20100101-20251231.txt"
 
-# 米筐日频外部数据：研究期在根目录，2022–2025 在 oos/ 子目录
-EXTERNAL_DIR = DATA_ROOT / "external_rqdata"
-EXTERNAL_OOS_DIR = EXTERNAL_DIR / "oos"
-RESEARCH_FEE_PATH = DATA_ROOT / "research" / "fee_history.csv"
-OOS_FEE_PATH = DATA_ROOT / "oos" / "fee_history.csv"
 
-RESEARCH_START = _dt.date(2010, 1, 1)
+def partition_dir(partition: str, data_root: Path = DATA_ROOT) -> Path:
+    if partition not in PARTITIONS:
+        raise HoldoutViolation(f"未知分区 {partition}")
+    return Path(data_root) / partition
+
+
+def daily_dir(partition: str, data_root: Path = DATA_ROOT) -> Path:
+    return partition_dir(partition, data_root) / "daily"
+
+
+def minute_dir(partition: str, data_root: Path = DATA_ROOT) -> Path:
+    return partition_dir(partition, data_root) / "minute"
+
+
+def execution_dir(partition: str, data_root: Path = DATA_ROOT) -> Path:
+    return partition_dir(partition, data_root) / "execution"
+
+
+RESEARCH_FEE_PATH = execution_dir("research") / "fee_history.csv"
+OOS_FEE_PATH = execution_dir("oos") / "fee_history.csv"
+RESEARCH_EXECUTION_PARAMETERS = execution_dir("research") / "parameters"
+
+# 2020-01-01 前商品期货成交量、成交额、持仓量为双边统计，之后为单边；米筐日线保留原口径
+SINGLE_SIDED_FROM = _dt.date(2020, 1, 1)
+DOUBLE_SIDED_FIELDS = ("volume", "total_turnover", "open_interest")
+
+RESEARCH_START = _dt.date(2010, 1, 4)
 RESEARCH_END = _dt.date(2021, 12, 31)
 OOS_START = _dt.date(2022, 1, 1)
 DEFAULT_OOS_END = _dt.date(2025, 12, 31)
 TRADING_DAYS_PER_YEAR = 242
+PARTITION_WINDOWS = {
+    "research": (RESEARCH_START, RESEARCH_END),
+    "oos": (OOS_START, DEFAULT_OOS_END),
+}
+
+
+def split_period(start: _dt.date, end: _dt.date) -> list[tuple[str, _dt.date, _dt.date]]:
+    periods = []
+    for partition, (lower, upper) in PARTITION_WINDOWS.items():
+        left, right = max(start, lower), min(end, upper)
+        if left <= right:
+            periods.append((partition, left, right))
+    return periods
 
 ALL_SYMBOLS = [
     "AG", "AL", "AU", "BC", "BU", "CU", "FU", "HC", "LU", "NI", "NR", "PB", "RB",
@@ -64,17 +93,13 @@ class HoldoutViolation(RuntimeError):
     """日期或路径越出声明的分区。"""
 
 
-def _oos_roots() -> tuple[Path, ...]:
-    return (OOS_SHARD_DIR, EXTERNAL_OOS_DIR, OOS_FEE_PATH.parent)
-
-
 def assert_research_only(path) -> None:
-    """研究读取不得打开任何样本外路径。"""
-    p = Path(path).resolve()
-    for root in _oos_roots():
-        r = root.resolve()
-        if p == r or r in p.parents:
-            raise HoldoutViolation(f"研究阶段禁止读取样本外数据: {p}")
+    """研究读取不得打开样本外或归档路径。"""
+    original = Path(_os.path.abspath(path))
+    p = original.resolve()
+    for root in (partition_dir("oos"), ARCHIVE_DIR):
+        if original.is_relative_to(root.absolute()) or p.is_relative_to(root.resolve()):
+            raise HoldoutViolation(f"研究阶段禁止读取样本外或归档数据: {p}")
 
 
 def assert_no_holdout_dates(values, what: str = "data") -> None:

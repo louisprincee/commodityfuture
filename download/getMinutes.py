@@ -1,19 +1,13 @@
-"""从米筐下载商品期货 1 分钟行情（88 原始主力、889 复权主力、99 指数持仓/成交量），合并为单体 pickle。
-
-    python -m download.getMinutes -t 20100101-20251231
-
-输出 data/data_min/future_all1mdata_<起>-<止>.txt（内容为 pickle 的 DataFrame，列为 (品种, 字段)）。
-已有总表时只增量下载末日之后的区间。金融期货不在下载列表中。
-"""
+"""下载商品期货 1 分钟行情，按样本分区与品种保存 Parquet。"""
 from __future__ import annotations
 
 import argparse
 import os
-import pickle
 import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import pandas as pd
 from tqdm import tqdm
@@ -23,150 +17,165 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 import config as C  # noqa: E402
 from rq_auth import rqdata_credentials  # noqa: E402
 
-DEFAULT_END = C.DEFAULT_OOS_END
-SERIES = ("88", "889", "99")
-TIME_TYPE = "1m"
-PRICE = ["open", "close", "high", "low"]
-PRICE_W = ["openw", "closew", "highw", "loww"]
+PRICE = ["open", "high", "low", "close"]
 
 
-def find_and_load_all(prefix: str, directory: str) -> tuple[pd.DataFrame, list[str]]:
-    """加载目录中同一前缀的全部分段文件，按时间去重排序。"""
-    pattern = re.compile(rf"{prefix}(\d{{8}})-(\d{{8}})\.txt")
-    paths = [os.path.join(directory, f) for f in os.listdir(directory) if pattern.match(f)]
-    frames = []
-    for path in paths:
-        with open(path, "rb") as f:
-            frames.append(pickle.load(f))
-        print(f"已加载: {os.path.basename(path)}")
-    if not frames:
-        return pd.DataFrame(), paths
-    data = pd.concat(frames, axis=0)
-    data = data[~data.index.duplicated(keep="last")].sort_index()
-    return data, paths
+def _series(rq, contract: str, start: date, end: date, fields: list[str]) -> pd.DataFrame:
+    frame = rq.get_price(contract, start_date=start, end_date=end, frequency="1m", fields=fields)
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=fields, index=pd.DatetimeIndex([], name="datetime"))
+    frame = frame.copy()
+    frame.index = pd.DatetimeIndex(frame.index.get_level_values("datetime"), name="datetime")
+    return frame.loc[~frame.index.duplicated(keep="last"), fields].sort_index()
 
 
-def save_and_clean(data: pd.DataFrame, file_path: str, clean: bool = True) -> None:
-    """保存数据；只删除日期区间被新文件完全覆盖的同前缀旧文件。"""
-    if data.empty:
-        print("无数据可保存")
-        return
-    file_name = os.path.basename(file_path)
-    prefix = "_".join(file_name.split("_")[:-1])
-    with open(file_path, "wb") as f:
-        pickle.dump(data, f)
-    print(f"已保存: {file_name}")
-    if not clean:
-        return
-    new_start, new_end = re.search(r"(\d{8})-(\d{8})\.txt$", file_name).groups()
-    pattern = re.compile(rf"^{re.escape(prefix)}_(\d{{8}})-(\d{{8}})\.txt$")
-    out_dir = os.path.dirname(os.path.abspath(file_path))
-    for f in os.listdir(out_dir):
-        m = pattern.match(f)
-        if m and f != file_name and new_start <= m.group(1) and m.group(2) <= new_end:
-            os.remove(os.path.join(out_dir, f))
-            csv = os.path.join(out_dir, f.replace(".txt", ".csv"))
-            if os.path.exists(csv):
-                os.remove(csv)
-            print(f"已清理旧文件: {f}")
+def _trading_dates(frame: pd.DataFrame) -> pd.Series:
+    if "trading_date" not in frame:
+        raise ValueError("分钟分片必须包含交易日")
+    raw = frame["trading_date"]
+    if pd.api.types.is_numeric_dtype(raw):
+        raw = raw.astype("Int64").astype("string")
+    days = pd.to_datetime(raw).dt.normalize()
+    if days.isna().any():
+        raise ValueError("分钟分片存在空交易日")
+    return days
 
 
-def file_span(path: str | None) -> tuple[str | None, str | None]:
-    if not path:
-        return None, None
-    m = re.search(r"(\d{8})-(\d{8})", path)
-    return (m.group(1), m.group(2)) if m else (None, None)
+def _check_partition(frame: pd.DataFrame, partition: str) -> None:
+    days = _trading_dates(frame)
+    if partition == "research":
+        C.assert_no_holdout_dates(days, "分钟分片")
+        if days.lt(pd.Timestamp(C.RESEARCH_START)).any():
+            raise C.HoldoutViolation("分钟分片早于研究期起点")
+    elif partition == "oos":
+        C.assert_oos_dates(days, "分钟分片")
+    else:
+        raise C.HoldoutViolation(f"未知分区 {partition}")
 
 
-def download_series(rq, names: list[str], suffix: str, start: str, end: str) -> pd.DataFrame:
-    """逐品种下载一个连续序列，拼成 (品种, 字段) 双层列。"""
+def write_shard(path: Path, partition: str, incoming: pd.DataFrame) -> None:
+    """保留历史列并以新观测更新重叠分钟，校验后原子替换。"""
+    if partition == "research":
+        C.assert_research_only(path)
+    _check_partition(incoming, partition)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".parquet.lock")
+    with lock.open("x"):
+        pass
+    try:
+        _merge_and_replace(path, partition, incoming)
+    finally:
+        lock.unlink()
+
+
+def _merge_and_replace(path: Path, partition: str, incoming: pd.DataFrame) -> None:
+    merged = incoming.assign(trading_date=_trading_dates(incoming))
+    if path.exists():
+        previous = pd.read_parquet(path)
+        _check_partition(previous, partition)
+        previous = previous.assign(trading_date=_trading_dates(previous))
+        # 同一时间戳应由交易所交易日唯一确定。
+        common = merged.index.intersection(previous.index)
+        if not merged.loc[common, "trading_date"].equals(previous.loc[common, "trading_date"]):
+            raise ValueError(f"{path.name} 的重叠分钟交易日不一致")
+        merged = merged.combine_first(previous)
+    merged = merged.sort_index()
+    if not merged.index.is_unique:
+        raise ValueError(f"{path.name} 有重复分钟")
+    with NamedTemporaryFile(dir=path.parent, prefix=path.stem, suffix=".parquet.tmp", delete=False) as tmp:
+        temporary = Path(tmp.name)
+    try:
+        merged.to_parquet(temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _download_symbol(rq, symbol: str, start: date, end: date) -> pd.DataFrame:
     parts = []
-    for name in tqdm(names, desc=f"下载 {suffix}"):
-        frame = rq.get_price(name + suffix, start_date=start, end_date=end, frequency=TIME_TYPE)
-        if frame is None or frame.empty:
-            print(f"{name}{suffix} 无数据，跳过", flush=True)
+    for year in range(start.year, end.year + 1):
+        left, right = max(start, date(year, 1, 1)), min(end, date(year, 12, 31))
+        base = _series(rq, symbol + "88", left, right,
+                       [*PRICE, "volume", "total_turnover", "open_interest", "trading_date"])
+        if base.empty:
             continue
-        frame.index = frame.index.get_level_values("datetime")
-        frame.columns = pd.MultiIndex.from_product([[name], frame.columns])
-        parts.append(frame)
+        adjusted = _series(rq, symbol + "889", left, right, PRICE).add_suffix("w")
+        aggregated = _series(rq, symbol + "99", left, right, ["open_interest", "volume"]).add_suffix("99")
+        combined = base.join([adjusted, aggregated])
+        day = _trading_dates(combined)
+        parts.append(combined.loc[day.between(pd.Timestamp(left), pd.Timestamp(right))])
     if not parts:
-        raise ValueError(f"{suffix} 未下载到任何品种")
-    return pd.concat(parts, axis=1)
+        return pd.DataFrame()
+    combined = pd.concat(parts)
+    return combined.loc[~combined.index.duplicated(keep="last")].sort_index()
 
 
-def assemble(data: dict[str, pd.DataFrame], names: list[str]) -> pd.DataFrame:
-    """88 原始价 + 889 复权价（openw/closew/highw/loww）+ 99 持仓量/成交量。"""
-    parts = []
-    for name in names:
-        if any(name not in data[s].columns.get_level_values(0) for s in SERIES):
-            continue
-        w = data["889"][name][PRICE].rename(columns=dict(zip(PRICE, PRICE_W)))
-        v = data["99"][name][["open_interest", "volume"]].rename(
-            columns={"open_interest": "open_interest99", "volume": "volume99"})
-        frame = pd.concat([data["88"][name], w, v], axis=1)
-        frame.columns = pd.MultiIndex.from_product([[name], frame.columns])
-        parts.append(frame)
-    return pd.concat(parts, axis=1)
+def _missing_edges(path: Path, partition: str, days: pd.DatetimeIndex) -> list[tuple[date, date]]:
+    """已有分片只补首尾区间，交易日以交易所日历为准。"""
+    if days.empty:
+        return []
+    if partition == "research":
+        C.assert_research_only(path)
+    if not path.exists():
+        return [(days[0].date(), days[-1].date())]
+    previous = pd.read_parquet(path, columns=["trading_date"])
+    if previous.empty:
+        return [(days[0].date(), days[-1].date())]
+    _check_partition(previous, partition)
+    observed = _trading_dates(previous)
+    gaps = (days[days < observed.min()], days[days > observed.max()])
+    return [(gap[0].date(), gap[-1].date()) for gap in gaps if not gap.empty]
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    default_end = min(date.today() - timedelta(days=1), DEFAULT_END)
-    parser.add_argument("-t", "--time-period", dest="time_period",
-                        default=f"20240101-{default_end:%Y%m%d}", help="YYYYMMDD-YYYYMMDD")
-    parser.add_argument("--datapath", default=str(C.MINUTE_RAW_DIR))
+    default_end = min(date.today() - timedelta(days=1), C.DEFAULT_OOS_END)
+    parser.add_argument("-t", "--time-period", default=f"20240101-{default_end:%Y%m%d}",
+                        help="YYYYMMDD-YYYYMMDD")
+    parser.add_argument("--datapath", type=Path, default=C.DATA_ROOT,
+                        help="数据根目录，分别写入 research/minute 和 oos/minute")
     parser.add_argument("--symbols", nargs="+", default=None, help="默认全部商品品种")
-    parser.add_argument("--standalone", action="store_true",
-                        help="只保存本次区间，不与已有总表合并，也不删除已有文件")
+    parser.add_argument("--standalone", action="store_true", help="写到 minute/segments 下的独立日期段")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"\d{8}-\d{8}", args.time_period):
         parser.error("--time-period 格式必须为 YYYYMMDD-YYYYMMDD")
-    target_start, target_end = args.time_period.split("-")
-    if target_start > target_end:
-        parser.error("开始日期不能晚于结束日期")
-    names = [s.upper() for s in args.symbols] if args.symbols else list(C.COMMODITY_SYMBOLS)
-    financial = sorted(set(names) & set(C.FINANCIAL_SYMBOLS))
-    if financial:
-        parser.error(f"本仓库只下载商品期货，拒绝金融期货: {financial}")
-
-    data_dir = os.path.abspath(args.datapath)
-    os.makedirs(data_dir, exist_ok=True)
-    prefix = "future_all1mdata"
-    existing = None
-    if not args.standalone:
-        monoliths = sorted(f for f in os.listdir(data_dir)
-                           if re.fullmatch(rf"{prefix}_\d{{8}}-\d{{8}}\.txt", f))
-        if len(monoliths) > 1:
-            parser.error(f"目录里有多个总表 {monoliths}；请用 --standalone 下载新区间")
-        existing = os.path.join(data_dir, monoliths[0]) if monoliths else None
-    ex_start, ex_end = file_span(existing)
-    period, full_period = args.time_period, args.time_period
-    if existing is not None:
-        if target_end <= ex_end:
-            print(f"已有数据已覆盖 {args.time_period}，无需更新")
-            return 0
-        nxt = (pd.Timestamp(ex_end) + pd.Timedelta(days=1)).strftime("%Y%m%d")
-        period = f"{nxt}-{target_end}"
-        full_period = f"{min(ex_start, target_start)}-{target_end}"
-        print(f"增量下载范围: {period}")
+    try:
+        start, end = (pd.Timestamp(value).date() for value in args.time_period.split("-"))
+    except ValueError:
+        parser.error("--time-period 包含无效日期")
+    if start > end or end > default_end:
+        parser.error("日期倒置或晚于已登记范围")
+    periods = C.split_period(start, end)
+    if not periods:
+        parser.error("日期窗口与已登记数据分区没有交集")
+    names = list(dict.fromkeys(s.upper() for s in (args.symbols or C.COMMODITY_SYMBOLS)))
+    unknown = sorted(set(names) - set(C.COMMODITY_SYMBOLS))
+    if unknown:
+        parser.error(f"本仓库只下载已登记的商品期货品种: {unknown}")
 
     credentials = rqdata_credentials()
     if credentials is None:
-        parser.error("请在 config/rqdata.env 填写 RQDATAC_LICENSE，或填写用户名和密码")
+        parser.error("请在 config/rqdata.env 配置米筐凭证")
     import rqdatac as rq
 
     rq.init(*credentials)
-    start, end = period.split("-")
-    fetched = {s: download_series(rq, names, s, start, end) for s in SERIES}
-    data = assemble(fetched, names)
-    if existing is not None:
-        history, _ = find_and_load_all(f"{prefix}_", data_dir)
-        data = pd.concat([history, data], axis=0)
-        data = data[~data.index.duplicated(keep="last")].sort_index()
-    out = os.path.join(data_dir, f"{prefix}_{full_period}.txt")
-    save_and_clean(data, out, clean=not args.standalone)
-    print(f"下载完成: {out}")
-    return 0
+    failures = 0
+    for partition, left, right in periods:
+        directory = C.minute_dir(partition, args.datapath)
+        if args.standalone:
+            directory = directory / "segments" / f"{left:%Y%m%d}-{right:%Y%m%d}"
+        days = pd.DatetimeIndex(rq.get_trading_dates(left, right)).sort_values()
+        for name in tqdm(names, desc=f"分钟 {partition}"):
+            try:
+                path = directory / f"{name}.parquet"
+                for start, end in _missing_edges(path, partition, days):
+                    frame = _download_symbol(rq, name, start, end)
+                    if not frame.empty:
+                        write_shard(path, partition, frame)
+            except Exception as exc:
+                failures += 1
+                print(f"{partition}/{name} 未更新: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return int(bool(failures))
 
 
 if __name__ == "__main__":

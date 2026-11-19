@@ -833,6 +833,35 @@ def test_flow_control_ablation_preserves_fixed_leg_budgets():
     )
 
 
+def test_position_blend_uses_common_complete_cross_section_and_balanced_tails():
+    from strategies.position_blend import BOOK_LABELS, FACTOR_NAMES, blend_scores
+
+    dates = pd.bdate_range("2021-12-01", periods=2)
+    symbols = [f"S{i:02d}" for i in range(10)]
+    columns = pd.MultiIndex.from_product([FACTOR_NAMES, symbols])
+    values = np.tile(np.arange(10, dtype=float), (len(FACTOR_NAMES), 1))
+    values[0] *= -1
+    factors = pd.DataFrame(
+        np.tile(values.ravel(), (len(dates), 1)),
+        index=dates,
+        columns=columns,
+    )
+    factors.loc[dates[0], ("FLOW_CONTROL", "S00")] = np.nan
+    eligible = pd.DataFrame(True, index=dates, columns=symbols)
+
+    scores, weights = blend_scores(factors, eligible)
+
+    assert tuple(scores) == tuple(BOOK_LABELS)
+    for book in BOOK_LABELS:
+        row = weights[book].loc[dates[0]]
+        assert row["S00"] == 0
+        assert row["S01"] == pytest.approx(-0.25)
+        assert row["S09"] == pytest.approx(0.25)
+        assert row.sum() == pytest.approx(0)
+        assert row.abs().sum() == pytest.approx(1)
+    assert pd.isna(scores["POSITION_FLOW_TREND"].loc[dates[0], "S00"])
+
+
 def test_power_kds_weights_can_normalize_by_actual_active_count():
     from strategies.power_kds import power_kds_weights
 

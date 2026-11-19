@@ -1,4 +1,4 @@
-"""读取米筐商品日频数据并构造主力 / 次主力日面板。研究期与样本外分开读取。"""
+"""读取米筐商品日频数据，构造主力 / 次主力日面板与时点流动性池。研究期与样本外分开读取。"""
 from __future__ import annotations
 
 import os
@@ -248,3 +248,60 @@ def build_daily_panel(partition: str = "research", symbols: list[str] | None = N
     panel["sector"] = panel["symbol"].map(C.SECTOR)
     _check_dates(panel["date"], partition, "日面板")
     return panel.sort_values(["date", "symbol"], kind="mergesort").reset_index(drop=True)
+
+
+def eligibility(panel: pd.DataFrame) -> pd.Series:
+    """时点品种池：过去 242 日成交额中位数、上市天数、当日主力有成交。收盘时当日成交额已知。"""
+    universe = C.UNIVERSE
+    grouped = panel.groupby("symbol", sort=False)
+    median = grouped["turnover_total"].transform(
+        lambda s: s.rolling(
+            universe["turnover_window_days"], min_periods=universe["turnover_min_periods"]
+        ).median()
+    )
+    age = grouped.cumcount() + 1
+    ok = (median >= universe["min_median_daily_turnover_cny"]) & (age >= universe["min_history_days"])
+    if universe["require_dominant_volume_positive"]:
+        ok &= panel["c1_volume"] > 0
+    ok &= panel["ret1"].notna()
+    ok &= ~panel["symbol"].isin(universe["excluded_symbols"])
+    return ok.fillna(False)
+
+
+PANEL_DIR = C.study_dir("panel")
+
+
+def build_panel_cache() -> pd.DataFrame:
+    """重建研究期日面板缓存与逐年品种池统计。"""
+    import json
+    import time
+
+    PANEL_DIR.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    panel = build_daily_panel("research")
+    C.assert_no_holdout_dates(panel["date"], "日面板")
+    panel["eligible"] = eligibility(panel)
+    panel.to_parquet(PANEL_DIR / "daily_panel.parquet", index=False)
+    eligible = panel[panel["eligible"]]
+    by_year = eligible.groupby(eligible["date"].dt.year)["symbol"].agg(["nunique"])
+    by_year["avg_daily"] = eligible.groupby(
+        [eligible["date"].dt.year, "date"]).size().groupby(level=0).mean().round(1)
+    by_year.to_csv(PANEL_DIR / "universe_by_year.csv")
+    members = eligible.groupby(eligible["date"].dt.year)["symbol"].unique().apply(sorted)
+    (PANEL_DIR / "universe_members.json").write_text(
+        json.dumps({int(year): list(symbols) for year, symbols in members.items()},
+                   ensure_ascii=False, indent=1), encoding="utf-8")
+    print(by_year.to_string())
+    print(f"日面板 {panel.shape}，用时 {time.time() - started:.0f}s → {PANEL_DIR}")
+    return panel
+
+
+def load_panel() -> pd.DataFrame:
+    """读取研究期日面板缓存；缺失时重建。"""
+    path = PANEL_DIR / "daily_panel.parquet"
+    if not path.exists():
+        return build_panel_cache()
+    C.assert_research_only(path)
+    panel = pd.read_parquet(path)
+    C.assert_no_holdout_dates(panel["date"], "日面板")
+    return panel

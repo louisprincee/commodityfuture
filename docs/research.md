@@ -332,7 +332,7 @@ POWER_20 的 60 日重叠净夏普 0.70、毛夏普 0.91、年化 2.3%、日换�
 
 空仓增量去均值加缓冲的毛年化为 15.01%，仍需支付 22.58 个百分点的年化成本。按板块内排序并等权时，缓冲版日换手达 234.3%，净年化 −15.54%。板块越小，单个品种进出引起的权重跳动越大。严格一致性日换手较低，同时只有 132 天持仓。缓冲提高了存续时间，期间的旧头寸有可能已经失去预测力。下一项研究宜先检验空仓变化相对于合约持仓的幅度和同一合约连续样本上的变化，确认该效果来自减弱的卖压还是覆盖和移仓变动，再确定值得实际交易的幅度。化工条件反转单独保留。未将这两种经济机制等权合成。
 
-完整结果包括 [IC 摘要](../runs/research/xs_position/paper_ic.csv)、[日度 IC](../runs/research/xs_position/paper_ic_daily.csv)、[单品种时序 IC](../runs/research/xs_position/paper_ic_timeseries.csv)、[指标覆盖](../runs/research/xs_position/paper_coverage.csv) 与 [缓冲对照](../runs/research/xs_position/paper_buffer.csv)。
+完整结果包括 [IC 摘要](../runs/research/xs_position/paper_ic.csv)、[日度 IC](../runs/research/xs_position/paper_ic_daily.csv)、[单品种时序 IC](../runs/research/xs_position/paper_ic_timeseries.csv)、[指标覆盖](../runs/research/xs_position/paper_coverage.csv) 与 [缓冲对照](../runs/strategies/buffer/paper_buffer.csv)。
 
 ## 11. 合约级成交榜与 1000 万元整数手账户
 
@@ -422,7 +422,7 @@ POWER_20 的 60 日重叠净夏普 0.70、毛夏普 0.91、年化 2.3%、日换�
 
 FLOW 的五日 IC 有最强的全市场证据，但固定五日的账户期末中位数仍低于 1000 万元，再迟一天降到 798.93 万元。化工拥挤反转的结果更像短期出清，日调仓收益来自有限的触发日，延迟一天与固定五日都会削弱表现。有色共振低换手且五个偏移均有正的净收益，平均总敞口中位数只有 0.85%，持仓日中位数为 120 天，期末中位数只比初始权益高 24.76 万元。该结果优先作为板块择时线索观察。
 
-非调仓日的换月成交仍计入成本。旧仓可平后，新合约若受最小下单量、流动性或保证金限制，可能只成交部分或暂留现金，直到下次调仓。108 个账户情景均无未更新结算估值或期末残仓。本节只使用 2016–2021 研究期表现，未读取 OOS。详见 [各偏移账户结果](../runs/research/xs_position/five_day_accounts.csv) 和 [汇总](../runs/research/xs_position/five_day_phase_summary.csv)。
+非调仓日的换月成交仍计入成本。旧仓可平后，新合约若受最小下单量、流动性或保证金限制，可能只成交部分或暂留现金，直到下次调仓。108 个账户情景均无未更新结算估值或期末残仓。本节只使用 2016–2021 研究期表现，未读取 OOS。详见 [各偏移账户结果](../runs/strategies/hold_five/five_day_accounts.csv) 和 [汇总](../runs/strategies/hold_five/five_day_phase_summary.csv)。
 
 ## 13. 单品种择时与相同名义预算的截面对照
 
@@ -524,17 +524,19 @@ FLOW 的五日 IC 有最强的全市场证据，但固定五日的账户期末�
 
 ## 16. 复算
 
-当前保留的活跃命令如下：
+当前保留的活跃命令如下。`research` 只计算因子与 IC，`backtest.engine` 按 `strategies/` 中的持仓规则核算账户：
 
 ```bash
 python -m research panel
 python -m research member-ic --jobs 8
 python -m research paper-ic --jobs 8
-python -m research hold-five --jobs 8
-python -m research risk-budget --jobs 8
+python -m research five-day-ic --jobs 8
+python -m backtest.engine buffer --jobs 8
+python -m backtest.engine hold-five --jobs 8
+python -m backtest.engine risk-budget --jobs 8
 ```
 
-其中 `member-ic` 输出至 `runs/research/member_ic/`；`paper-ic`、`hold-five` 与 `risk-budget` 输出至 `runs/research/xs_position/`。早期的 `check`（数据核检）、`xs`、`position-diagnostics`、`execution`、`timing` 及 `event-timing` 脚本及其对应的过程性实验产物已完成历史验证并精简移除，第 2–13 节与第 15 节正文保留历史结论记录。
+`member-ic` 输出至 `runs/research/member_ic/`；`paper-ic` 与 `five-day-ic` 输出至 `runs/research/xs_position/`；第 10.4 节缓冲对照、第 12.3 节五日账户与第 17 节风险预算组合分别输出至 `runs/strategies/buffer/`、`runs/strategies/hold_five/` 与 `runs/strategies/risk_budget/`。早期的 `check`（数据核检）、`xs`、`position-diagnostics`、`execution`、`timing` 及 `event-timing` 脚本已精简移除，第 2–13 节与第 15 节正文保留历史结论记录，其产物保留在 `runs/research/xs_position/`。
 
 第 11 节的新增数据可用以下命令更新，两项下载均按研究期边界执行。
 
@@ -584,4 +586,4 @@ python -m download.getExecutionParameters
 - **空仓冲击多头腿的 Beta 拆解**：未对冲的 `SAT_SS_LONG_5D` 表面夏普 `1.44`（年化 `+5.90%`），但 `beta_to_bmk` 达 `0.387`。一旦用全市场等权空头篮子实时对冲掉 Beta（`SAT_SS_LONG_5D_HEDGED`），由于每天需对全市场约 50 个空头对冲品种支付换手滑点和手续费，净年化降至 `+0.36%`（市场调整净年化 `−0.04%`），`delay=1` 或 `2 ticks` 均转亏。
 - **组合含意**：若追求严格市场中性（低 Beta），单纯把低波但弱超额的 `SAT_SS_LONG_5D_HEDGED` 用波动率倒数混入底仓会稀释 `CORE_POWER_10D` 的夏普（`COMBO_10D_5DH_1X` 年化 `+0.96%`、夏普 `0.69` 低于单跑 `CORE_POWER_10D` 的 `+3.01%`、夏普 `0.76`）；若允许保留约 `0.43` 的商品多头 Beta，不进行全市场空头对冲的 `COMBO_10D_5D_UNHEDGED_2X` 在 `delay=0` 取得 `+9.64%` 年化（夏普 `1.63`，最大回撤 `−8.31%`，保证金均值 `18.91%`，扣 Beta 后超额 `+4.98%`），`delay=1` 与 `2 ticks` 下仍维持 `+7.45%`（夏普 `1.27`）与 `+7.15%`（夏普 `1.22`）。
 
-完整结果见 [风险预算摘要](../runs/research/xs_position/risk_budget/summary.csv)、[子策略相关性](../runs/research/xs_position/risk_budget/sleeve_correlations.csv) 和 [净值曲线](../runs/research/xs_position/risk_budget/equity_curves_d0_t1.csv)。
+完整结果见 [风险预算摘要](../runs/strategies/risk_budget/summary.csv)、[子策略相关性](../runs/strategies/risk_budget/sleeve_correlations.csv) 和 [净值曲线](../runs/strategies/risk_budget/equity_curves_d0_t1.csv)。

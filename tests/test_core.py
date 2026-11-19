@@ -6,7 +6,9 @@ import pandas as pd
 import pytest
 
 import config as C
-from research import portfolio as P
+import data as D
+from backtest import engine as P
+from strategies import rules as R
 
 
 def test_member_ic_label_uses_entry_contract_on_both_future_trading_dates():
@@ -42,7 +44,7 @@ def test_member_ic_pairs_only_dates_with_factor_and_label_and_keeps_zero_signals
 
 
 def test_independent_timing_keeps_direction_until_its_own_exit():
-    from research.factors import timing_directions
+    from strategies.rules import timing_directions
 
     z = pd.DataFrame({"A": [1.2, .2, np.nan, -1.2, -.3, .1],
                       "B": [-1.2, -.2, .2, 1.6, .6, -.2]})
@@ -68,7 +70,7 @@ def test_multi_day_forward_return_compounds_only_complete_future_windows():
 
 
 def test_fixed_rebalance_holds_integer_lots_between_schedule_dates():
-    from research.execution import Quote, simulate
+    from backtest.engine import Quote, simulate
 
     dates = pd.bdate_range("2021-12-01", periods=9)
     contracts = pd.DataFrame({"A": ["A2201"] * 4 + ["A2205"] * 5}, index=dates)
@@ -85,7 +87,7 @@ def test_fixed_rebalance_holds_integer_lots_between_schedule_dates():
 
 
 def test_lot_targets_round_to_zero_and_leave_margin_reserve():
-    from research.execution import lot_targets
+    from backtest.engine import lot_targets
 
     result = lot_targets(np.array([1.0, -1.0, 0.01]), np.array([90, 80, 40]),
                          np.array([0.5, 0.5, 0.5]), np.full(3, 100), 1000, 0.5)
@@ -93,7 +95,7 @@ def test_lot_targets_round_to_zero_and_leave_margin_reserve():
 
 
 def test_execution_roll_closes_old_and_opens_new_with_separate_fees():
-    from research.execution import Quote, simulate
+    from backtest.engine import Quote, simulate
 
     dates = pd.date_range("2021-12-27", periods=4)
     calls = {"A": "A2201", "B": "A2205"}
@@ -113,7 +115,7 @@ def test_execution_roll_closes_old_and_opens_new_with_separate_fees():
 
 
 def test_execution_carries_old_contract_if_a_sell_is_blocked_at_limit_down():
-    from research.execution import Quote, simulate
+    from backtest.engine import Quote, simulate
 
     days = pd.date_range("2021-12-27", periods=4)
     principal = pd.DataFrame({"A": ["A2201", "A2201", "A2205", "A2205"]}, index=days)
@@ -189,7 +191,7 @@ def test_paper_spider_aggregates_contracts_and_uses_disclosed_contract_oi():
 
 
 def test_paper_rank_buffer_keeps_incumbent_until_middle():
-    from research.ic_study import buffered_tails
+    from strategies.rules import buffered_tails
 
     scores = pd.DataFrame([[5, 4, 3, 2, 1], [4, 5, 3, 2, 1], [2, 5, 4, 3, 1]])
     regular = buffered_tails(scores, min_names=5, buffered=False)
@@ -276,11 +278,11 @@ def test_holdout_date_guard():
 
 def test_eligibility_ignores_future_turnover():
     panel = synthetic_panel()
-    before = P.eligibility(panel)
+    before = D.eligibility(panel)
     changed = panel.copy()
     cut = panel["date"].iloc[250]
     changed.loc[changed["date"] > cut, "turnover_total"] = 0.0
-    after = P.eligibility(changed)
+    after = D.eligibility(changed)
     past = panel["date"] <= cut
     pd.testing.assert_series_equal(before[past], after[past])
     assert before[past].iloc[-1]
@@ -288,13 +290,13 @@ def test_eligibility_ignores_future_turnover():
 
 def test_crowding_cross_section_shorts_the_crowded_name():
     score = pd.DataFrame([[0.2, 0.8]], columns=["quiet", "crowded"]) * -1
-    weights = P.score_to_weights(score).iloc[0]
+    weights = R.score_to_weights(score).iloc[0]
     assert weights["quiet"] > 0 > weights["crowded"]
 
 
 def test_weights_legs_and_monotone():
     score = pd.DataFrame([[0.1, 0.4, 0.6, 0.9, np.nan]], columns=list("abcde"))
-    weights = P.score_to_weights(score).iloc[0]
+    weights = R.score_to_weights(score).iloc[0]
     assert weights[weights > 0].sum() == pytest.approx(1.0)
     assert weights[weights < 0].sum() == pytest.approx(-1.0)
     assert weights["e"] == 0
@@ -369,7 +371,7 @@ def test_cost_matrix_uses_only_same_contract_past_fee_schedule():
 def test_hold_cohorts_average_and_ramp():
     dates = pd.bdate_range("2020-01-01", periods=4)
     weights = pd.DataFrame({"a": [1.0, -1.0, 1.0, 1.0], "b": [-1.0, 1.0, -1.0, -1.0]}, index=dates)
-    held = P.hold_cohorts(weights, 2)
+    held = R.hold_cohorts(weights, 2)
     assert held.loc[dates[0], "a"] == pytest.approx(0.5)
     assert held.loc[dates[1], "a"] == pytest.approx(0.0)
     assert held.loc[dates[3], "a"] == pytest.approx(1.0)
@@ -515,7 +517,7 @@ def test_download_rejects_financial_futures():
 
 
 def test_short_shock_uses_past_quantiles_and_missing_stays_inactive():
-    from research.factors import short_shock
+    from strategies.rules import short_shock
 
     values = pd.Series([-30., -20., -10., 100., np.nan, -200.])
     signal, strength = short_shock(values, window=3, minimum=2)
@@ -525,7 +527,7 @@ def test_short_shock_uses_past_quantiles_and_missing_stays_inactive():
 
 
 def test_short_shock_keeps_crossings_after_flat_history():
-    from research.factors import short_shock
+    from strategies.rules import short_shock
 
     signal, strength = short_shock(pd.Series([0., 0., 0., 1.]), window=3, minimum=3)
     assert signal.iloc[-1] == 1
@@ -533,7 +535,7 @@ def test_short_shock_keeps_crossings_after_flat_history():
 
 
 def test_execution_retains_same_direction_lots_and_reconciles_equity():
-    from research.execution import Quote, simulate
+    from backtest.engine import Quote, simulate
 
     dates = pd.bdate_range("2021-12-01", periods=4)
     contracts = pd.DataFrame({"A": "A2201"}, index=dates)
@@ -549,7 +551,7 @@ def test_execution_retains_same_direction_lots_and_reconciles_equity():
 
 
 def test_risk_budget_weights_hedging_and_causal_inverse_vol():
-    from research.risk_budget import (
+    from strategies.rules import (
         active_weights,
         hedge_against_benchmark,
         inverse_vol_weights,

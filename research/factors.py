@@ -318,33 +318,3 @@ def symbol_factors(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,
         (flow / oi).rename("FLOW_CONTROL"),
         spider_signal(tables, active_only=True).rename("SPIDER_ACTIVE_PROXY"),
     ], axis=1)
-
-
-# ---------------------------------------------------------------- 策略信号映射
-
-def short_shock(values: pd.Series, window: int = 250, minimum: int = 60) -> tuple[pd.Series, pd.Series]:
-    """按此前窗口的分位开仓，并用上下分位间距衡量异常强度。"""
-    past = values.shift(1).rolling(window, min_periods=minimum)
-    hi, lo = past.quantile(CR["q_high"]), past.quantile(CR["q_low"])
-    spread = hi - lo
-    direction = values.gt(hi).astype(float) - values.lt(lo).astype(float)
-    distance = values - (hi + lo) / 2
-    strength = distance.div(spread.where(spread.gt(0)))
-    flat = spread.eq(0) & distance.notna()
-    strength = strength.mask(flat & distance.eq(0), 0)
-    strength = strength.mask(flat & distance.gt(0), np.inf).mask(flat & distance.lt(0), -np.inf)
-    return direction, strength
-
-
-def timing_directions(z: pd.DataFrame, level: pd.DataFrame) -> pd.DataFrame:
-    """同向合力或流量且越过自身一倍标准差才入场，回到零或数据缺失退出。"""
-    z_values = z.to_numpy()
-    levels = level.to_numpy()
-    held = np.zeros(z.shape[1], dtype=np.int8)
-    result = np.zeros(z.shape, dtype=np.int8)
-    for i, (score, raw) in enumerate(zip(z_values, levels)):
-        long = (score > 0) & (raw > 0) & ((score >= 1) | (held > 0))
-        short = (score < 0) & (raw < 0) & ((score <= -1) | (held < 0))
-        held = long.astype(np.int8) - short.astype(np.int8)
-        result[i] = held
-    return pd.DataFrame(result, index=z.index, columns=z.columns)

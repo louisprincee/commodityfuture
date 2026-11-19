@@ -1,4 +1,7 @@
-"""多周期子策略风险预算组合：低频一致性底仓 + 空仓冲击多头卫星（统一 20% 保证金）。"""
+"""多周期子策略风险预算组合：低频一致性底仓 + 空仓冲击多头卫星（统一 20% 保证金）。
+
+    python -m backtest.engine risk-budget
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,45 +12,16 @@ from joblib import Parallel, delayed
 
 import config as C
 import data as D
-from research import execution as E, factors as F, portfolio as P
+from backtest import engine as E
+from research import factors as F
+from strategies import rules as R
 from research.settings import XS_POSITION as XS
 
 FLAT_MARGIN = 0.20
-MIN_SLOTS = 10
+STRATEGY_ID = "risk_budget"
 SIGNAL_WINDOW = 250
 SIGNAL_MIN = 60
-VOL_WINDOW = 60
-VOL_MIN_PERIODS = 20
-WEIGHT_FLOOR = 0.20
 LEVERAGE_SPECS = ((1.0, E.NAME_CAP), (2.0, 0.15), (3.0, 0.20), (4.0, 0.20))
-
-
-def active_weights(direction: pd.DataFrame, min_slots: int = MIN_SLOTS) -> pd.DataFrame:
-    """在触发品种间等权分配 1 倍名义预算，激活品种不足 min_slots 时限制单品种名义占比。"""
-    active = direction.ne(0).sum(axis=1).clip(lower=min_slots)
-    return direction.div(active, axis=0).fillna(0.0)
-
-
-def hedge_against_benchmark(weights: pd.DataFrame, eligible: pd.DataFrame) -> pd.DataFrame:
-    """在组合层用当日流动性商品等权基准对冲净敞口，合并净头寸后执行。"""
-    net = weights.sum(axis=1)
-    n_elig = eligible.sum(axis=1).replace(0, np.nan)
-    hedge = eligible.astype(float).div(n_elig, axis=0).mul(net, axis=0).fillna(0.0)
-    return weights.sub(hedge, fill_value=0.0)
-
-
-def inverse_vol_weights(ret_core: pd.Series, ret_sat: pd.Series,
-                        window: int = VOL_WINDOW, min_periods: int = VOL_MIN_PERIODS,
-                        floor: float = WEIGHT_FLOOR) -> tuple[pd.Series, pd.Series]:
-    """严格因果的滚动波动率倒数配权（仅用 t-1 及以前日收益，前 min_periods 日等权）。"""
-    vol_c = ret_core.shift(1).rolling(window, min_periods=min_periods).std()
-    vol_s = ret_sat.shift(1).rolling(window, min_periods=min_periods).std()
-    valid = vol_c.gt(0) & vol_s.gt(0)
-    inv_c = (1.0 / vol_c.where(valid)).fillna(0.0)
-    inv_s = (1.0 / vol_s.where(valid)).fillna(0.0)
-    denom = inv_c + inv_s
-    w_core = inv_c.div(denom.where(denom > 0)).clip(floor, 1.0 - floor).fillna(0.5)
-    return w_core, 1.0 - w_core
 
 
 def _symbol_scores(name: str, panel: pd.DataFrame, bars: pd.DataFrame,
@@ -58,7 +32,7 @@ def _symbol_scores(name: str, panel: pd.DataFrame, bars: pd.DataFrame,
     kaiyuan = F.kaiyuan(ranks, bars, dates, include_disclosed_oi=True)
     oi = kaiyuan["disclosed_oi"]
     shock = -kaiyuan["K_DS"].div(oi.where(oi.gt(0)))
-    shock_dir, _ = F.short_shock(shock)
+    shock_dir, _ = R.short_shock(shock)
     tables = F.member_tables(name, dates, top20=True)
     power = F.consistency_from_net(F.imputed_net(tables), 20)["POWER"]
     return pd.DataFrame({"power_filled": power, "short_shock": shock_dir}, index=dates)
@@ -66,7 +40,7 @@ def _symbol_scores(name: str, panel: pd.DataFrame, bars: pd.DataFrame,
 
 def _eval_book(name: str, sleeve: str, delay: int, ticks: int, phase: int,
                daily: pd.DataFrame, bmk_ret: pd.Series) -> dict:
-    stats = P.metrics(daily["return"], daily["turnover"])
+    stats = E.metrics(daily["return"], daily["turnover"])
     peak = daily["equity"].cummax().clip(lower=E.CAPITAL_CNY)
     ret = daily["return"].fillna(0.0)
     bmk = bmk_ret.reindex(ret.index).fillna(0.0)
@@ -88,10 +62,10 @@ def _eval_book(name: str, sleeve: str, delay: int, ticks: int, phase: int,
         "margin_mean": float(daily["margin_fraction"].mean()),
         "margin_max": float(daily["margin_fraction"].max()),
         "beta_to_bmk": beta,
-        "market_adj_net_ann": float(residual.mean() * P.TD),
-        "market_adj_sharpe": float(P.metrics(residual)["sharpe"]),
-        "net_ann_2016_2018": float(daily.loc[:"2018-12-31", "return"].mean() * P.TD),
-        "net_ann_2019_2021": float(daily.loc["2019-01-01":, "return"].mean() * P.TD),
+        "market_adj_net_ann": float(residual.mean() * E.TD),
+        "market_adj_sharpe": float(E.metrics(residual)["sharpe"]),
+        "net_ann_2016_2018": float(daily.loc[:"2018-12-31", "return"].mean() * E.TD),
+        "net_ann_2019_2021": float(daily.loc["2019-01-01":, "return"].mean() * E.TD),
         "terminal_contracts": int(daily["open_contracts"].iloc[-1]),
         "stale_marks": int(daily["stale_marks"].sum()),
     }
@@ -104,7 +78,7 @@ def run(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> None:
     C.assert_no_holdout_dates(fees["trading_date"], "风险预算手续费")
 
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
-    panel = panel.assign(eligible=P.eligibility(panel))
+    panel = panel.assign(eligible=D.eligibility(panel))
     dates = pd.DatetimeIndex(panel["date"].unique()).sort_values()
     start = pd.Timestamp(XS["test_start"])
     names = sorted(panel.loc[panel["eligible"] & panel["date"].ge(start), "symbol"].unique())
@@ -135,23 +109,23 @@ def run(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> None:
     raw_power = scores["power_filled"]
     past = raw_power.shift(1).rolling(SIGNAL_WINDOW, min_periods=SIGNAL_MIN)
     z_power = (raw_power - past.mean()).div(past.std().where(lambda s: s.gt(0)))
-    daily_core_dir = F.timing_directions(z_power.loc[start:].where(eligible), raw_power.loc[start:].where(eligible))
-    w_core_10d = P.hold_cohorts(active_weights(daily_core_dir), 10)
+    daily_core_dir = R.timing_directions(z_power.loc[start:].where(eligible), raw_power.loc[start:].where(eligible))
+    w_core_10d = R.hold_cohorts(R.active_weights(daily_core_dir), 10)
     w_core_5d_phases = {}
     for phase in range(5):
         obs = z_power.loc[start:].where(eligible).iloc[phase::5]
-        w_core_5d_phases[phase] = active_weights(F.timing_directions(obs, raw_power.reindex(obs.index).where(eligible)))
+        w_core_5d_phases[phase] = R.active_weights(R.timing_directions(obs, raw_power.reindex(obs.index).where(eligible)))
     w_core_5d_step0 = w_core_5d_phases[0].reindex(eligible.index).ffill().fillna(0.0)
 
     shock_sig = scores["short_shock"].loc[start:].where(eligible, 0.0).fillna(0.0)
-    w_sat_1d = active_weights(shock_sig.clip(lower=0.0))
-    w_sat_1d_hedged = hedge_against_benchmark(w_sat_1d, eligible)
-    w_sat_5d = P.hold_cohorts(w_sat_1d, 5)
-    w_sat_5d_hedged = hedge_against_benchmark(w_sat_5d, eligible)
-    w_sat_5d_bi = P.hold_cohorts(active_weights(shock_sig), 5)
+    w_sat_1d = R.active_weights(shock_sig.clip(lower=0.0))
+    w_sat_1d_hedged = R.hedge_against_benchmark(w_sat_1d, eligible)
+    w_sat_5d = R.hold_cohorts(w_sat_1d, 5)
+    w_sat_5d_hedged = R.hedge_against_benchmark(w_sat_5d, eligible)
+    w_sat_5d_bi = R.hold_cohorts(R.active_weights(shock_sig), 5)
     w_bmk = eligible.astype(float).div(eligible.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
 
-    out_dir = out / "risk_budget"
+    out_dir = out
     out_dir.mkdir(parents=True, exist_ok=True)
     rows, ledger_curves, corr_rows = [], {}, []
 
@@ -209,7 +183,7 @@ def run(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> None:
                  w_sat_1d_hedged, sim_res["SAT_SS_LONG_1D_HEDGED"]["return"], ((1.0, E.NAME_CAP), (2.0, 0.15))),
             ]
             for cname, wc, rc, ws, rs, lev_specs in combos:
-                alpha_c, alpha_s = inverse_vol_weights(rc, rs)
+                alpha_c, alpha_s = R.inverse_vol_weights(rc, rs)
                 w_base = wc.mul(alpha_c, axis=0) + ws.mul(alpha_s, axis=0)
                 for lev, cap in lev_specs:
                     book_name = f"{cname}_{int(lev)}X"

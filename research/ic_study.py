@@ -1,4 +1,7 @@
-"""IC 检验合并模块：逐品种时序 IC（member-ic）、全市场与板块截面 IC（paper-ic）及 5 日预测与固定调仓（hold-five）。"""
+"""因子 IC 检验：逐品种时序 IC（member-ic）、全市场与板块截面 IC（paper-ic）及 5 日预测 IC（five-day-ic）。
+
+只计算因子与未来收益的秩相关，不构建持仓；持仓规则在 strategies，账户核算在 backtest。
+"""
 from __future__ import annotations
 
 from functools import reduce
@@ -12,28 +15,14 @@ from joblib import Parallel, delayed
 
 import config as C
 import data as D
-from research import execution as E, factors as F, portfolio as P
+from research import factors as F
 from research.settings import XS_POSITION as XS
 
 LABEL_FIELDS = ("entry_date", "exit_date", "entry_contract", "entry_open", "exit_open", "forward_return")
 MIN_DAYS = 120
 MIN_SECTOR_NAMES = 5
 HAC_LAGS = 20
-BUFFER_FACTORS = ("CROWD1", "POWER_20", "POWER_20_FILLED", "K_NET_60", "FLOW_CONTROL")
-
-HOLD_DAYS = 5
 HORIZONS = {"d1": (1, 0), "d5": (5, 0), "d2_to_d5": (4, 1), "d5_delayed": (5, 1)}
-BOOKS = {
-    "K_DS_GATE": ("K_DS", "delta", "gated"),
-    "CROWD1_Z": ("CROWD1", "z", "buffer"),
-    "POWER_20_STRICT_Z": ("POWER_20", "z", "rank"),
-    "POWER_20_FILLED_Z": ("POWER_20_FILLED", "z", "buffer"),
-    "K_NET_60_Z": ("K_NET_60", "z", "buffer"),
-    "CROWD2_TAIL_CHEM": ("CROWD2_TAIL", "raw", "signal:chemicals"),
-    "SPIDER_ACTIVE": ("SPIDER_ACTIVE", "raw", "signal"),
-    "FLOW_RAW": ("FLOW_CONTROL", "raw", "rank"),
-    "RESONANCE_60_METALS": ("BOTH_RESONANCE_60_FILLED", "raw", "signal:base_metals"),
-}
 
 
 # ---------------------------------------------------------------- 公共工具
@@ -130,7 +119,7 @@ def _stats(ic: pd.Series, count: pd.Series) -> dict:
     }
 
 
-def _return_matrix(contract_map: pd.DataFrame, bar_open: pd.Series) -> pd.DataFrame:
+def return_matrix(contract_map: pd.DataFrame, bar_open: pd.Series) -> pd.DataFrame:
     """逐合约匹配交易日开盘与下一交易日开盘，缺失日不跨越。"""
     dates = contract_map.index
     ids = contract_map.to_numpy().ravel()
@@ -141,35 +130,6 @@ def _return_matrix(contract_map: pd.DataFrame, bar_open: pd.Series) -> pd.DataFr
     valid = (entry > 0) & (exit_price > 0)
     ret = np.divide(exit_price, entry, out=np.full(len(entry), np.nan), where=valid) - 1
     return pd.DataFrame(ret.reshape(contract_map.shape), index=dates, columns=contract_map.columns)
-
-
-def buffered_tails(score: pd.DataFrame, min_names: int, buffered: bool,
-                   entry_gate: pd.DataFrame | None = None) -> pd.DataFrame:
-    """两端各约 30% 入场。缓冲版穿过中位数退出。缺失值退出。"""
-    ranks = score.rank(axis=1)
-    counts = score.count(axis=1)
-    tail_count = (counts * 0.30).apply(np.floor).clip(lower=1)
-    enter_long = ranks.gt(counts - tail_count, axis=0)
-    enter_short = ranks.le(tail_count, axis=0)
-    if entry_gate is not None:
-        enter_long &= entry_gate.ge(1)
-        enter_short &= entry_gate.le(-1)
-    enter_long = enter_long.to_numpy()
-    enter_short = enter_short.to_numpy()
-    centered = ranks.sub((counts + 1) / 2, axis=0).to_numpy()
-    result = np.zeros(ranks.shape)
-    status = np.zeros(ranks.shape[1])
-    for i, count in enumerate(counts):
-        hold_long = (status > 0) & (centered[i] > 0) & buffered
-        hold_short = (status < 0) & (centered[i] < 0) & buffered
-        long = enter_long[i] | hold_long
-        short = enter_short[i] | hold_short
-        if count >= min_names and long.any() and short.any():
-            status = long.astype(float) - short.astype(float)
-            result[i] = long / long.sum() - short / short.sum()
-        else:
-            status.fill(0)
-    return pd.DataFrame(result, index=score.index, columns=score.columns)
 
 
 def _one_symbol_paper(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,
@@ -223,7 +183,7 @@ def _one_symbol_member_ic(symbol: str, panel: pd.DataFrame, bars: pd.DataFrame,
 def run_member_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
     C.assert_no_holdout_dates(panel.date, "逐品种 IC 日面板")
     panel = panel.loc[panel.symbol.isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"]).copy()
-    panel["eligible"] = P.eligibility(panel)
+    panel["eligible"] = D.eligibility(panel)
     calendar = pd.DatetimeIndex(panel.date.unique()).sort_values()
     start = pd.Timestamp(XS["test_start"])
     root = C.daily_dir("research") / "member_rank"
@@ -255,55 +215,10 @@ def run_member_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
 
 # ---------------------------------------------------------------- 2) paper-ic
 
-def _buffer_rows(scores, returns, fee, rolls, sectors, start):
-    for (name, norm), score in scores.items():
-        score = score.loc[start:].reindex(score.index)
-        for scope in ("all", "sector_neutral"):
-            for buffered in (False, True):
-                if scope == "all":
-                    weights = buffered_tails(score, XS["min_names"], buffered)
-                else:
-                    books = [
-                        buffered_tails(score.loc[:, cols], MIN_SECTOR_NAMES, buffered)
-                        for cols in sectors.values()
-                    ]
-                    active = sum(book.abs().sum(axis=1).gt(0).astype(float) for book in books)
-                    weights = pd.concat(books, axis=1).reindex(columns=score.columns)
-                    weights = weights.div(active.where(active.gt(0)), axis=0).fillna(0)
-                weights.loc[weights.index < start] = 0
-                for delay in (0, 1):
-                    held = weights.shift(1 + delay).fillna(0)
-                    prev = held.shift().fillna(0)
-                    new_trade = (held - prev).abs().where(~rolls, held.abs())
-                    old_trade = prev.abs().where(rolls, 0)
-                    old_fee = fee.shift(1)
-                    turnover = (new_trade + old_trade).sum(axis=1)
-                    valid = (~(held.ne(0) & returns.isna()).any(axis=1)
-                             & ~(new_trade.gt(0) & fee.isna()).any(axis=1)
-                             & ~(old_trade.gt(0) & old_fee.isna()).any(axis=1))
-                    gross = (held * returns).sum(axis=1)
-                    cost = ((new_trade * fee).sum(axis=1) + (old_trade * old_fee).sum(axis=1)) / 10_000
-                    gross = gross.where(valid).loc[start:]
-                    net = (gross - cost.loc[start:]).dropna()
-                    stats = P.metrics(net, turnover)
-                    yield {
-                        "factor": name, "norm": norm, "scope": scope, "buffered": buffered, "delay": delay,
-                        "ann_gross": gross.mean() * P.TD,
-                        "ann_cost": cost.reindex(net.index).mean() * P.TD,
-                        "net_ann": stats["ann_return"], "net_sharpe": stats["sharpe"],
-                        "turnover": stats["daily_turnover"], "hac_t": _hac_t(gross - cost.loc[start:]),
-                        "days": len(net), "excluded_days": int((~valid.loc[start:]).sum()),
-                        "active_days": int(held.loc[net.index].abs().sum(axis=1).gt(0).sum()),
-                    }
-
-
-def run_paper_ic(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> None:
+def run_paper_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
     C.assert_no_holdout_dates(panel["date"], "原文指标日面板")
-    C.assert_research_only(fee_path)
-    fees = pd.read_csv(fee_path, parse_dates=["trading_date"])
-    C.assert_no_holdout_dates(fees["trading_date"], "原文指标手续费")
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
-    eligible = P.eligibility(panel)
+    eligible = D.eligibility(panel)
     dates = pd.DatetimeIndex(panel["date"].unique()).sort_values()
     start = pd.Timestamp(XS["test_start"])
     calendar = dates[dates >= start]
@@ -319,23 +234,17 @@ def run_paper_ic(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> N
     )
     factors = pd.concat(pieces, axis=1, keys=symbols).swaplevel(axis=1)
     contract_map = panel.pivot(index="date", columns="symbol", values="c1_contract").reindex(index=dates, columns=symbols)
-    returns = _return_matrix(contract_map, contracts.set_index(["contract", "date"])["open"])
-    rolls = contract_map.ne(contract_map.shift(1)) & contract_map.notna() & contract_map.shift(1).notna()
-    fee = P.cost_rate_matrix(panel, fees, XS["slippage_ticks"]).reindex_like(returns)
+    returns = return_matrix(contract_map, contracts.set_index(["contract", "date"])["open"])
     eligible = panel.assign(eligible=eligible).pivot(index="date", columns="symbol", values="eligible")
     eligible = eligible.reindex_like(returns).astype("boolean").fillna(False).astype(bool)
     sector_series = pd.Series({s: C.SECTOR[s] for s in symbols})
     sectors = {str(name): list(group.index) for name, group in sector_series.groupby(sector_series)}
     forward = {delay: returns.shift(-(1 + delay)).loc[calendar] for delay in (0, 1)}
-    daily, rows, ts_rows, buffer_scores, coverage = {}, [], [], {}, []
+    daily, rows, ts_rows, coverage = {}, [], [], []
 
     for name in pieces[0].columns:
         variants = _score_variants(name, factors[name])
         score = variants["raw"]
-        if name in BUFFER_FACTORS:
-            buffer_scores[(name, "z")] = variants["z"].where(eligible)
-        if name == "K_DS":
-            buffer_scores.update({(name, norm): value.where(eligible) for norm, value in variants.items()})
         family = _factor_family(name)
         valid = (score.notna() & eligible).loc[calendar]
         coverage.append({
@@ -378,18 +287,16 @@ def run_paper_ic(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> N
     pd.DataFrame(daily).to_csv(out / "paper_ic_daily.csv", index_label="date")
     pd.DataFrame(ts_rows).to_csv(out / "paper_ic_timeseries.csv", index=False)
     pd.DataFrame(coverage).to_csv(out / "paper_coverage.csv", index=False)
-    pd.DataFrame(_buffer_rows(buffer_scores, returns, fee, rolls, sectors, start)).to_csv(
-        out / "paper_buffer.csv", index=False)
     print(summary.loc[primary, ["factor", "mean_ic", "hac_t", "q_primary", "q_all", "days"]].round(4).to_string(index=False))
 
 
-# ---------------------------------------------------------------- 3) hold-five
+# ---------------------------------------------------------------- 3) five-day-ic
 
 def study_inputs(panel: pd.DataFrame, jobs: int):
     """研究期品种池、信号分数与主力合约行情。"""
     C.assert_no_holdout_dates(panel.date, "会员持仓研究日面板")
     panel = panel.loc[panel.symbol.isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
-    eligible = P.eligibility(panel)
+    eligible = D.eligibility(panel)
     root = C.daily_dir("research") / "member_rank"
     C.assert_research_only(root)
     names = sorted(s for s in panel.loc[eligible, "symbol"].unique() if (root / f"{s}_long.pkl").is_file())
@@ -441,57 +348,11 @@ def _ic_summary_5d(scores, outcomes, sectors):
     return result
 
 
-def _weights_5d(score, gate, rule, sectors):
-    if rule.startswith("signal"):
-        _, _, sector = rule.partition(":")
-        if sector:
-            score = score.loc[:, sectors[sector]]
-        minimum = MIN_SECTOR_NAMES if sector else XS["min_names"]
-        count = score.count(axis=1)
-        return score.div(count.where(count.ge(minimum)), axis=0).fillna(0)
-    return buffered_tails(score, XS["min_names"], buffered=rule != "rank", entry_gate=gate)
-
-
-def _account_rows_5d(scores, contracts, market, start, sectors):
-    for name, (factor, norm, rule) in BOOKS.items():
-        score = scores[factor][norm]
-        for interval in (1, HOLD_DAYS):
-            for phase in range(interval):
-                observations = score.iloc[phase::interval]
-                gate = scores[factor]["z"].reindex(observations.index) if rule == "gated" else None
-                weights = _weights_5d(observations, gate, rule, sectors)
-                neutral = not rule.startswith("signal")
-                for delay in (0, 1):
-                    daily, fills = E.simulate(weights, contracts, market, start, delay, neutral=neutral,
-                                              rebalance_every=interval, phase=phase)
-                    stats = P.metrics(daily["return"], daily["turnover"])
-                    peak = daily.equity.cummax().clip(lower=E.CAPITAL_CNY)
-                    schedule = daily.index[phase + 1 + delay::interval]
-                    outside = fills.loc[~fills.date.isin(schedule) & fills.date.ne(daily.index[-1])] if len(fills) else fills
-                    yield {
-                        "book": name, "interval": interval, "phase": phase, "delay": delay,
-                        "end_equity": daily.equity.iloc[-1], "net_sharpe": stats["sharpe"],
-                        "net_ann": stats["ann_return"], "turnover": stats["daily_turnover"],
-                        "max_drawdown": (daily.equity / peak - 1).min(),
-                        "gross_pnl": daily.gross_pnl.sum(), "fees": daily.fees.sum(), "slippage": daily.slippage.sum(),
-                        "avg_gross_fraction": daily.gross_notional.div(daily.equity).mean(),
-                        "avg_abs_net_fraction": daily.net_notional.abs().div(daily.equity).mean(),
-                        "active_days": daily.open_contracts.gt(0).sum(), "fill_days": fills.date.nunique() if len(fills) else 0,
-                        "off_schedule_fills": len(outside), "blocked_rolls": daily.blocked_rolls.sum(),
-                        "terminal_contracts": daily.open_contracts.iloc[-1], "stale_marks": daily.stale_marks.sum(),
-                        "net_ann_2016_2018": daily.loc[:"2018-12-31", "return"].mean() * P.TD,
-                        "net_ann_2019_2021": daily.loc["2019-01-01":, "return"].mean() * P.TD,
-                    }
-
-
-def run_hold_five(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> None:
-    C.assert_research_only(fee_path)
-    fees = pd.read_csv(fee_path, parse_dates=["trading_date"])
-    C.assert_no_holdout_dates(fees.trading_date, "五日研究手续费")
+def run_five_day_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
+    """次日、5 日、第 2–5 日与延后一日 5 日收益的截面 IC。"""
     scores, eligible, contracts, bars = study_inputs(panel, jobs)
     sample = eligible.index
-    start = sample[0]
-    returns = _return_matrix(contracts, bars.set_index(["contract", "date"])["open"])
+    returns = return_matrix(contracts, bars.set_index(["contract", "date"])["open"])
     outcomes = {
         window: forward_returns(returns, horizon, delay).loc[sample]
         for window, (horizon, delay) in HORIZONS.items()
@@ -502,14 +363,4 @@ def run_hold_five(panel: pd.DataFrame, fee_path: Path, out: Path, jobs: int) -> 
     out.mkdir(parents=True, exist_ok=True)
     ic = _ic_summary_5d(scores, outcomes, sectors)
     ic.to_csv(out / "five_day_ic.csv", index=False)
-    print(f"预测检验完成：{len(ic)} 项；开始整数手调仓比较", flush=True)
-    ids = [contract for contract in pd.unique(contracts.loc[sample].to_numpy().ravel()) if isinstance(contract, str)]
-    market = E.load_market(bars[["date", "contract", "open", "settlement", "volume"]], fees, ids, start)
-    accounts = pd.DataFrame(_account_rows_5d(scores, contracts, market, start, sectors))
-    accounts.to_csv(out / "five_day_accounts.csv", index=False)
-    metrics = ["net_sharpe", "net_ann", "turnover", "end_equity", "avg_gross_fraction", "active_days"]
-    phase_stats = accounts.groupby(["book", "interval", "delay"])[metrics].agg(["min", "median", "max"])
-    phase_stats.columns = ["_".join(parts) for parts in phase_stats.columns]
-    phase_stats.to_csv(out / "five_day_phase_summary.csv")
-    print(phase_stats.loc[(slice(None), slice(None), 0), ["net_sharpe_median", "turnover_median", "end_equity_median"]]
-          .round(4).to_string())
+    print(f"预测检验完成：{len(ic)} 项，结果写入 {out}", flush=True)

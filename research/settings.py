@@ -1,15 +1,7 @@
-"""研究设定。截面会员持仓因子的方向、窗口与组合在看到收益之前固定。"""
+"""因子研究设定。会员持仓因子的方向、窗口与检验口径在看到收益之前固定。"""
 from __future__ import annotations
 
-# 流动性池。门槛沿用既有研究口径，不在本轮按收益调整。
-UNIVERSE = {
-    "turnover_window_days": 242,
-    "turnover_min_periods": 60,
-    "min_median_daily_turnover_cny": 500_000_000,
-    "min_history_days": 130,
-    "require_dominant_volume_positive": True,
-    "excluded_symbols": ["EC"],
-}
+# 流动性池定义在 src/config.py 的 UNIVERSE，研究、策略与回测共用。
 
 # 兴业证券（2026-08-05）：商品与国债为拥挤反转，分位阈值不含当日。
 CROWDING = {

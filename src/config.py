@@ -42,6 +42,16 @@ OOS_EXECUTION_PARAMETERS = execution_dir("oos") / "parameters"
 SINGLE_SIDED_FROM = _dt.date(2020, 1, 1)
 DOUBLE_SIDED_FIELDS = ("volume", "total_turnover", "open_interest")
 
+# 时点流动性池。研究、策略与回测共用；门槛沿用既有研究口径，不按收益调整。
+UNIVERSE = {
+    "turnover_window_days": 242,
+    "turnover_min_periods": 60,
+    "min_median_daily_turnover_cny": 500_000_000,
+    "min_history_days": 130,
+    "require_dominant_volume_positive": True,
+    "excluded_symbols": ["EC"],
+}
+
 RESEARCH_START = _dt.date(2010, 1, 4)
 RESEARCH_END = _dt.date(2021, 12, 31)
 OOS_START = _dt.date(2022, 1, 1)
@@ -122,5 +132,10 @@ def assert_oos_dates(values, what: str = "data") -> None:
 
 
 def study_dir(name: str) -> Path:
-    """研究输出：runs/research/<名称>/。"""
+    """因子研究输出：runs/research/<名称>/。"""
     return RUNS_DIR / "research" / name
+
+
+def strategy_dir(name: str) -> Path:
+    """策略回测输出：runs/strategies/<名称>/。"""
+    return RUNS_DIR / "strategies" / name

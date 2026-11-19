@@ -62,8 +62,11 @@ def _positive_int(value, default):
     return max(1, floor(value)) if np.isfinite(value) and value > 0 else default
 
 
-def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path = PARAMETER_CACHE):
+def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path = PARAMETER_CACHE,
+                flat_margin: float | None = None):
     """交易参数与合约日线对齐，成交量容量仅使用截至前日的数据。"""
+    if flat_margin is not None and not (0 < flat_margin <= 1):
+        raise ValueError("flat_margin 必须在 (0, 1] 内")
     C.assert_research_only(root)
     names = set(ids)
     bars = bars.loc[bars.contract.isin(names)].sort_values(["contract", "date"]).copy()
@@ -120,10 +123,16 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
             opening_cap = 0
         max_order = _positive_int(row.max_order_quantity, 10**9)
         min_order = _positive_int(np.ceil(row.min_order_quantity), 1)
+        long_margin = flat_margin if flat_margin is not None else (
+            min(1.0, ratio_long + BROKER_MARGIN_ADDON) if isfinite(ratio_long) else 1.0
+        )
+        short_margin = flat_margin if flat_margin is not None else (
+            min(1.0, ratio_short + BROKER_MARGIN_ADDON) if isfinite(ratio_short) else 1.0
+        )
         market.setdefault(row.date, {})[row.contract] = Quote(
             row.open, row.settlement, row.contract_multiplier, row.tick_size,
-            min(1.0, ratio_long + BROKER_MARGIN_ADDON) if isfinite(ratio_long) else 1.0,
-            min(1.0, ratio_short + BROKER_MARGIN_ADDON) if isfinite(ratio_short) else 1.0,
+            long_margin,
+            short_margin,
             row.commission_type == "by_volume",
             row.open_commission, row.close_commission,
             min_order, max_order, max(0, floor(row.client_limit)) if isfinite(row.client_limit) else 10**9,
@@ -133,15 +142,16 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
 
 
 def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, neutral=True,
-             slippage_ticks=SLIPPAGE_TICKS, rebalance_every=1, phase=0, keep_same_lots=False):
+             slippage_ticks=SLIPPAGE_TICKS, rebalance_every=1, phase=0, keep_same_lots=False,
+             name_cap=NAME_CAP):
     """按开盘标价和滑点成交，按结算价盯市。先平仓，之后才允许开仓。"""
-    if capital <= 0 or slippage_ticks < 0:
-        raise ValueError("初始本金必须为正，滑点不得为负")
+    if capital <= 0 or slippage_ticks < 0 or not (0 < name_cap <= 1):
+        raise ValueError("初始本金必须为正，滑点不得为负，单品种上限必须在 (0, 1] 内")
     if rebalance_every < 1 or not 0 <= phase < rebalance_every:
         raise ValueError("调仓周期和起始偏移不匹配")
     dates = contracts.loc[start:].index
     targets = weights.reindex_like(contracts).fillna(0).shift(1 + delay).loc[dates].fillna(0)
-    targets = targets.clip(-NAME_CAP, NAME_CAP)
+    targets = targets.clip(-name_cap, name_cap)
     if neutral:
         long, short = targets.clip(lower=0), targets.clip(upper=0)
         long_total, short_total = long.sum(axis=1), -short.sum(axis=1)
@@ -194,7 +204,7 @@ def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, ne
                 retained = target.copy()
                 for contract, _, value, quote in signals:
                     held = positions.get(contract, (0,))[0]
-                    name_limit = NAME_CAP * equity / (quote.open * quote.multiplier)
+                    name_limit = name_cap * equity / (quote.open * quote.multiplier)
                     if held * value > 0 and abs(held) <= min(quote.limit, name_limit):
                         retained[contract] = held
                 gross_at_open = 0.0

@@ -10,7 +10,7 @@ from research import portfolio as P
 
 
 def test_member_ic_label_uses_entry_contract_on_both_future_trading_dates():
-    from research.member_ic import forward_open_returns
+    from research.ic_study import forward_open_returns
 
     days = pd.DatetimeIndex(["2021-12-24", "2021-12-27", "2021-12-28", "2021-12-29"])
     dominant = pd.Series(["OLD", "NEW", "LATER", "LATER"], index=days)
@@ -26,7 +26,7 @@ def test_member_ic_label_uses_entry_contract_on_both_future_trading_dates():
 
 
 def test_member_ic_pairs_only_dates_with_factor_and_label_and_keeps_zero_signals():
-    from research.member_ic import summarize_symbol
+    from research.ic_study import summarize_symbol
 
     data = pd.DataFrame({"forward_return": [1.0, 2.0, 3.0, 4.0, np.nan],
                          "CROWD1": [3.0, 2.0, 1.0, np.nan, 0.0],
@@ -42,7 +42,7 @@ def test_member_ic_pairs_only_dates_with_factor_and_label_and_keeps_zero_signals
 
 
 def test_independent_timing_keeps_direction_until_its_own_exit():
-    from research.experiments.timing_study import timing_directions
+    from research.factors import timing_directions
 
     z = pd.DataFrame({"A": [1.2, .2, np.nan, -1.2, -.3, .1],
                       "B": [-1.2, -.2, .2, 1.6, .6, -.2]})
@@ -55,7 +55,7 @@ def test_independent_timing_keeps_direction_until_its_own_exit():
 
 
 def test_multi_day_forward_return_compounds_only_complete_future_windows():
-    from research.experiments.hold_study import forward_returns
+    from research.ic_study import forward_returns
 
     dates = pd.bdate_range("2021-12-01", periods=10)
     returns = pd.DataFrame({"A": [0.9, .01, .02, .03, .04, .05, .06, .07, .08, .09]}, index=dates)
@@ -68,7 +68,7 @@ def test_multi_day_forward_return_compounds_only_complete_future_windows():
 
 
 def test_fixed_rebalance_holds_integer_lots_between_schedule_dates():
-    from research.experiments.execution import Quote, simulate
+    from research.execution import Quote, simulate
 
     dates = pd.bdate_range("2021-12-01", periods=9)
     contracts = pd.DataFrame({"A": ["A2201"] * 4 + ["A2205"] * 5}, index=dates)
@@ -85,7 +85,7 @@ def test_fixed_rebalance_holds_integer_lots_between_schedule_dates():
 
 
 def test_lot_targets_round_to_zero_and_leave_margin_reserve():
-    from research.experiments.execution import lot_targets
+    from research.execution import lot_targets
 
     result = lot_targets(np.array([1.0, -1.0, 0.01]), np.array([90, 80, 40]),
                          np.array([0.5, 0.5, 0.5]), np.full(3, 100), 1000, 0.5)
@@ -93,7 +93,7 @@ def test_lot_targets_round_to_zero_and_leave_margin_reserve():
 
 
 def test_execution_roll_closes_old_and_opens_new_with_separate_fees():
-    from research.experiments.execution import Quote, simulate
+    from research.execution import Quote, simulate
 
     dates = pd.date_range("2021-12-27", periods=4)
     calls = {"A": "A2201", "B": "A2205"}
@@ -113,7 +113,7 @@ def test_execution_roll_closes_old_and_opens_new_with_separate_fees():
 
 
 def test_execution_carries_old_contract_if_a_sell_is_blocked_at_limit_down():
-    from research.experiments.execution import Quote, simulate
+    from research.execution import Quote, simulate
 
     days = pd.date_range("2021-12-27", periods=4)
     principal = pd.DataFrame({"A": ["A2201", "A2201", "A2205", "A2205"]}, index=days)
@@ -131,7 +131,7 @@ def test_execution_carries_old_contract_if_a_sell_is_blocked_at_limit_down():
 
 
 def test_active_spider_requires_the_same_contract_and_day():
-    from research.paper_factors import kaiyuan_active
+    from research.factors import kaiyuan_active
 
     day = pd.Timestamp("2020-01-06")
     ranks = pd.DataFrame({
@@ -152,7 +152,7 @@ def test_active_spider_requires_the_same_contract_and_day():
 
 
 def test_paper_crowding_absolute_changes_are_taken_before_aggregation():
-    from research.paper_factors import crowding
+    from research.factors import crowding
 
     days = pd.bdate_range("2020-01-01", periods=4)
     tables = {
@@ -167,7 +167,7 @@ def test_paper_crowding_absolute_changes_are_taken_before_aggregation():
 
 
 def test_paper_spider_aggregates_contracts_and_uses_disclosed_contract_oi():
-    from research.paper_factors import kaiyuan
+    from research.factors import kaiyuan
 
     days = pd.bdate_range("2020-01-06", periods=2)
     ranks = pd.DataFrame({
@@ -189,7 +189,7 @@ def test_paper_spider_aggregates_contracts_and_uses_disclosed_contract_oi():
 
 
 def test_paper_rank_buffer_keeps_incumbent_until_middle():
-    from research.experiments.paper_ic import buffered_tails
+    from research.ic_study import buffered_tails
 
     scores = pd.DataFrame([[5, 4, 3, 2, 1], [4, 5, 3, 2, 1], [2, 5, 4, 3, 1]])
     regular = buffered_tails(scores, min_names=5, buffered=False)
@@ -284,73 +284,6 @@ def test_eligibility_ignores_future_turnover():
     past = panel["date"] <= cut
     pd.testing.assert_series_equal(before[past], after[past])
     assert before[past].iloc[-1]
-
-
-def test_past_percentile_excludes_today_and_future():
-    from research.experiments.xs_position import past_pct
-
-    series = pd.Series([1.0, 3.0, 2.0, 4.0, 0.0])
-    pct = past_pct(series, 3)
-    assert pct.iloc[:3].isna().all()
-    assert pct.iloc[3] == pytest.approx(1.0)
-    assert pct.iloc[4] == pytest.approx(0.0)
-    revised = series.copy()
-    revised.iloc[-1] = 100.0
-    pd.testing.assert_series_equal(pct.iloc[:-1], past_pct(revised, 3).iloc[:-1])
-
-
-def test_past_zscore_uses_only_prior_observations():
-    from research.experiments.xs_position import past_zscore
-
-    series = pd.Series([1.0, 2.0, 3.0, 4.0, 100.0])
-    score = past_zscore(series, window=3, min_periods=3)
-    assert score.iloc[:3].isna().all()
-    assert score.iloc[3] == pytest.approx(2.0)  # 过去 1,2,3 的均值 2、标准差 1，当日 4
-    revised = series.copy()
-    revised.iloc[-1] = 0.0
-    pd.testing.assert_series_equal(score.iloc[:-1], past_zscore(revised, 3, 3).iloc[:-1])
-    flat = pd.Series([0.0, 0.0, 0.0, 0.0, 5.0])
-    assert np.isnan(past_zscore(flat, 3, 3).iloc[-1])  # 当日 5 不进入标准差
-
-
-def test_tail_weights_leave_the_middle_flat():
-    from research.experiments.xs_position import tail_weights
-
-    score = pd.DataFrame([[0.0, 1.0, 2.0, 3.0, 4.0]], columns=list("edcba"))
-    weights, _count = tail_weights(score, tail=0.2, min_names=5)
-    row = weights.iloc[0]
-    assert row["a"] == pytest.approx(0.5) and row["b"] == pytest.approx(0.5)
-    assert row["e"] == pytest.approx(-1.0)
-    assert row["c"] == 0.0 and row["d"] == 0.0
-
-
-def test_band_weights_keep_side_until_rank_crosses():
-    from research.experiments.xs_position import band_weights
-
-    score = pd.DataFrame({
-        "a": [4.0, 3.0, 0.0],
-        "b": [3.0, 4.0, 1.0],
-        "c": [2.0, 2.0, 2.0],
-        "d": [1.0, 1.0, 3.0],
-        "e": [0.0, 0.0, 4.0],
-    })
-    weights, _count = band_weights(score, band=0.10, min_names=5)
-    assert weights.loc[0, "a"] == pytest.approx(1 / 3)
-    assert weights.loc[1, "a"] == pytest.approx(1 / 3)
-    assert weights.loc[2, "a"] == pytest.approx(-0.5)
-    assert weights.loc[0, "c"] == pytest.approx(1 / 3)
-    assert weights.loc[2, "c"] == pytest.approx(1 / 3)
-
-
-def test_signal_book_excludes_names_before_first_signal():
-    from research.experiments.xs_position import signal_book
-
-    signal = pd.DataFrame({"a": [np.nan, 1.0, 0.0], "b": [1.0, 0.0, -1.0]})
-    weights = signal_book(signal, "reset", min_names=1)
-    assert weights.loc[0, "b"] == pytest.approx(1.0)
-    assert weights.loc[0, "a"] == 0.0
-    assert weights.loc[2, "a"] == 0.0
-    assert weights.loc[2, "b"] == pytest.approx(-0.5)
 
 
 def test_crowding_cross_section_shorts_the_crowded_name():
@@ -496,7 +429,7 @@ def _member_tables(dates, long_pos, short_pos, volume, d_long=None, d_short=None
 
 
 def test_member_quantile_bounds_exclude_today():
-    from research import member_study as MS
+    from research import factors as MS
 
     series = pd.Series([1.0, 2.0, 3.0, 100.0])
     high, _low = MS.bounds(series, 3, 0.9, 0.1)
@@ -505,7 +438,7 @@ def test_member_quantile_bounds_exclude_today():
 
 
 def test_member_crowding1_uses_speculative_seats_only():
-    from research import member_study as MS
+    from research import factors as MS
 
     dates = pd.bdate_range("2020-01-01", periods=2)
     long_pos = pd.DataFrame({"hedger": [1000.0, 1000.0], "spec": [100.0, 100.0]}, index=dates)
@@ -517,7 +450,7 @@ def test_member_crowding1_uses_speculative_seats_only():
 
 
 def test_member_crowding_signal_is_reversal_with_confirmation():
-    from research import member_study as MS
+    from research import factors as MS
 
     n = 30
     series = pd.Series(np.linspace(0, 1, n))
@@ -533,7 +466,7 @@ def test_member_crowding_signal_is_reversal_with_confirmation():
 
 
 def test_member_consistency_camps_and_slope():
-    from research import member_study as MS
+    from research import factors as MS
 
     dates = pd.bdate_range("2020-01-01", periods=10)
     trend = np.arange(10, dtype=float)
@@ -551,7 +484,7 @@ def test_member_consistency_camps_and_slope():
 
 
 def test_member_imputed_net_bounds_missing_side():
-    from research import member_study as MS
+    from research import factors as MS
 
     dates = pd.bdate_range("2020-01-01", periods=1)
     long_pos = pd.DataFrame({"a": [100.0], "b": [40.0], "c": [np.nan], "d": [np.nan]}, index=dates)
@@ -564,7 +497,7 @@ def test_member_imputed_net_bounds_missing_side():
 
 
 def test_member_spider_signal():
-    from research import member_study as MS
+    from research import factors as MS
 
     dates = pd.bdate_range("2020-01-01", periods=4)
     d_long = pd.DataFrame({"a": [5.0, -5.0, 5.0, 1.0], "b": [1.0, -1.0, 1.0, 1.0]}, index=dates)
@@ -582,7 +515,7 @@ def test_download_rejects_financial_futures():
 
 
 def test_short_shock_uses_past_quantiles_and_missing_stays_inactive():
-    from research.experiments.event_timing import short_shock
+    from research.factors import short_shock
 
     values = pd.Series([-30., -20., -10., 100., np.nan, -200.])
     signal, strength = short_shock(values, window=3, minimum=2)
@@ -592,56 +525,15 @@ def test_short_shock_uses_past_quantiles_and_missing_stays_inactive():
 
 
 def test_short_shock_keeps_crossings_after_flat_history():
-    from research.experiments.event_timing import short_shock
+    from research.factors import short_shock
 
     signal, strength = short_shock(pd.Series([0., 0., 0., 1.]), window=3, minimum=3)
     assert signal.iloc[-1] == 1
     assert strength.iloc[-1] > 0
 
 
-def test_event_requires_capacity_for_a_minimum_order_roundtrip():
-    from dataclasses import replace
-
-    from research.experiments.event_timing import _returns_and_costs
-    from research.experiments.execution import Quote
-
-    quote = Quote(100, 100, 10, 1, .15, .15, True, 2, 3, 2, 100, 100)
-    assert _returns_and_costs(quote, quote, 1)[-1]
-    assert not _returns_and_costs(replace(quote, limit=0), quote, 1)[-1]
-    assert not _returns_and_costs(quote, replace(quote, max_order=1), 1)[-1]
-
-
-def test_event_day_price_rejects_mismatched_main_series():
-    from research.experiments.event_timing import session_prices
-
-    minutes = pd.DataFrame(
-        {"trading_date": pd.to_datetime(["2021-12-29", "2021-12-29", "2021-12-29", "2021-12-30"]),
-         "open": [100., 102., 103., 115.], "close": [101., 103., 104., 116.]},
-        index=pd.to_datetime(["2021-12-28 21:01", "2021-12-29 09:01", "2021-12-29 15:00", "2021-12-30 09:01"]),
-    )
-    day = pd.DataFrame({"contract": ["A1", "A2"], "open": [100., 110.], "close": [104., 112.]},
-                       index=pd.to_datetime(["2021-12-29", "2021-12-30"]))
-    observed = session_prices(minutes, day)
-    assert observed.iloc[0].night and observed.iloc[0].day_open == 102
-    assert observed.iloc[0].contract == "A1"
-    assert not observed.iloc[1].night and pd.isna(observed.iloc[1].day_open)
-
-
-def test_session_minute_guard_accepts_final_research_day_and_rejects_oos():
-    from research.experiments.event_timing import session_prices
-
-    dates = pd.DatetimeIndex(["2021-12-31"])
-    daily = pd.DataFrame({"open": [100], "close": [100], "contract": ["A1"]}, index=dates)
-    minutes = pd.DataFrame({"trading_date": dates, "open": [100], "close": [100]},
-                           index=pd.DatetimeIndex(["2021-12-31 09:01"]))
-    assert session_prices(minutes, daily).day_open.iloc[0] == 100
-    with pytest.raises(C.HoldoutViolation):
-        session_prices(minutes.assign(trading_date=pd.Timestamp("2022-01-04")), daily)
-
-
-def test_execution_retains_same_direction_lots_and_trade_costs_reconcile():
-    from research.experiments.execution import Quote, simulate
-    from research.experiments.event_timing import roundtrips
+def test_execution_retains_same_direction_lots_and_reconciles_equity():
+    from research.execution import Quote, simulate
 
     dates = pd.bdate_range("2021-12-01", periods=4)
     contracts = pd.DataFrame({"A": "A2201"}, index=dates)
@@ -651,6 +543,52 @@ def test_execution_retains_same_direction_lots_and_trade_costs_reconcile():
     daily, fills = simulate(weights, contracts, market, dates[0], capital=100_000,
                             neutral=False, keep_same_lots=True)
     assert fills.trade_lots.tolist() == [5, -5]
-    trades = roundtrips(fills)
-    for field, ledger in (("gross_pnl", "gross_pnl"), ("fees", "fees"), ("slippage", "slippage")):
-        assert trades[field].sum() == pytest.approx(daily[ledger].sum())
+    assert daily.equity.iloc[-1] == pytest.approx(
+        100_000 + daily.gross_pnl.sum() - daily.fees.sum() - daily.slippage.sum()
+    )
+
+
+def test_risk_budget_weights_hedging_and_causal_inverse_vol():
+    from research.risk_budget import (
+        active_weights,
+        hedge_against_benchmark,
+        inverse_vol_weights,
+    )
+
+    dates = pd.bdate_range("2021-01-04", periods=30)
+    dirs = pd.DataFrame(0.0, index=dates, columns=["A", "B", "C", "D"])
+    dirs.iloc[0, 0] = 1.0
+    dirs.iloc[1, :3] = [1.0, 1.0, -1.0]
+    w = active_weights(dirs, min_slots=2)
+    assert w.iloc[0].tolist() == [0.5, 0.0, 0.0, 0.0]
+    assert w.iloc[1].tolist() == pytest.approx([1 / 3, 1 / 3, -1 / 3, 0.0])
+
+    elig = pd.DataFrame(True, index=dates, columns=["A", "B", "C", "D"])
+    hedged = hedge_against_benchmark(w, elig)
+    np.testing.assert_allclose(hedged.sum(axis=1), 0.0, atol=1e-12)
+    assert hedged.iloc[0].tolist() == pytest.approx([0.375, -0.125, -0.125, -0.125])
+
+    r_core = pd.Series(0.01 * np.sin(np.arange(30)), index=dates)
+    r_sat = pd.Series(0.03 * np.cos(np.arange(30)), index=dates)
+    wc, ws = inverse_vol_weights(r_core, r_sat, window=10, min_periods=5, floor=0.2)
+    assert (wc.iloc[:5] == 0.5).all()
+    assert wc.iloc[-1] > ws.iloc[-1]
+    np.testing.assert_allclose(wc + ws, 1.0)
+    # 篡改最后一日收益不得影响当日权重
+    r_sat_tampered = r_sat.copy()
+    r_sat_tampered.iloc[-1] = 10.0
+    wc2, _ = inverse_vol_weights(r_core, r_sat_tampered, window=10, min_periods=5, floor=0.2)
+    assert wc2.iloc[-1] == pytest.approx(wc.iloc[-1])
+
+
+def test_execution_parameters_partition_guards():
+    from download import getExecutionParameters as gep
+    import config as C
+
+    assert gep.PARTITION_CACHE["oos"] == C.OOS_EXECUTION_PARAMETERS
+    gep._check_dates(pd.to_datetime(["2021-12-31"]), "research", "test")
+    gep._check_dates(pd.to_datetime(["2022-01-04", "2025-12-31"]), "oos", "test")
+    with pytest.raises(C.HoldoutViolation):
+        gep._check_dates(pd.to_datetime(["2022-01-04"]), "research", "test")
+    with pytest.raises(C.HoldoutViolation):
+        gep._check_dates(pd.to_datetime(["2021-12-31"]), "oos", "test")

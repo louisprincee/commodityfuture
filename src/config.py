@@ -36,6 +36,7 @@ def execution_dir(partition: str, data_root: Path = DATA_ROOT) -> Path:
 RESEARCH_FEE_PATH = execution_dir("research") / "fee_history.csv"
 OOS_FEE_PATH = execution_dir("oos") / "fee_history.csv"
 RESEARCH_EXECUTION_PARAMETERS = execution_dir("research") / "parameters"
+OOS_EXECUTION_PARAMETERS = execution_dir("oos") / "parameters"
 
 # 2020-01-01 前商品期货成交量、成交额、持仓量为双边统计，之后为单边；米筐日线保留原口径
 SINGLE_SIDED_FROM = _dt.date(2020, 1, 1)

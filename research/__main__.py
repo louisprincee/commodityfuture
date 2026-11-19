@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 import time
@@ -17,13 +16,7 @@ import data as D
 from research import portfolio as P
 
 PANEL_DIR = C.study_dir("panel")
-COMMANDS = ("check", "panel", "member-ic")
-EXPERIMENTS = {
-    "xs": "xs_position", "paper-ic": "paper_ic", "execution": "execution_study",
-    "hold-five": "hold_study", "timing": "timing_study",
-    "event-timing": "event_timing",
-    "position-diagnostics": "position_diagnostics",
-}
+COMMANDS = ("panel", "member-ic", "paper-ic", "hold-five", "risk-budget")
 
 
 def run_panel() -> pd.DataFrame:
@@ -63,24 +56,30 @@ def main(cmd: str, argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if cmd == "panel":
         run_panel()
-    elif cmd == "member-ic":
-        from research import member_ic
-        member_ic.run(load_panel(), C.study_dir("member_ic"), jobs=args.jobs)
-    elif cmd in EXPERIMENTS:
-        study = importlib.import_module(f"research.experiments.{EXPERIMENTS[cmd]}")
-        study.run(load_panel(), C.RESEARCH_FEE_PATH, C.study_dir("xs_position"), jobs=args.jobs)
+        return 0
+    panel = load_panel()
+    if cmd == "member-ic":
+        from research import ic_study
+        ic_study.run_member_ic(panel, C.study_dir("member_ic"), jobs=args.jobs)
+        return 0
+    out = C.study_dir("xs_position")
+    if cmd == "paper-ic":
+        from research import ic_study
+        ic_study.run_paper_ic(panel, C.RESEARCH_FEE_PATH, out, jobs=args.jobs)
+    elif cmd == "hold-five":
+        from research import ic_study
+        ic_study.run_hold_five(panel, C.RESEARCH_FEE_PATH, out, jobs=args.jobs)
+    elif cmd == "risk-budget":
+        from research import risk_budget
+        risk_budget.run(panel, C.RESEARCH_FEE_PATH, out, jobs=args.jobs)
     return 0
 
 
 def cli(argv: list[str]) -> int:
-    if not argv or (argv[0] not in COMMANDS and argv[0] not in EXPERIMENTS):
+    if not argv or argv[0] not in COMMANDS:
         print(f"用法: python -m research {{{'|'.join(COMMANDS)}}} [参数]")
         return 2
-    cmd, rest = argv[0], argv[1:]
-    if cmd == "check":
-        from research import data_check
-        return data_check.run()
-    return main(cmd, rest)
+    return main(argv[0], argv[1:])
 
 
 if __name__ == "__main__":

@@ -1,57 +1,69 @@
 # Repository instructions
 
-Read before changes. If instructions conflict with code, establish the intended behavior from the current user request and update both together.
+Read before changes. These principles govern factor research, strategy development, and backtests. Paths, commands, factor names, and known data gaps live in the code and in `docs/research.md`.
 
 ## Scope
 
-Chinese commodity futures only. Financial futures (IF, IH, IC, IM, T, TF, TS, TL) are excluded from download and research. `src/config.py` lists them only so scripts can reject them. The code is split in three layers, following `time_factor_cta`:
+Chinese commodity futures only. Financial futures appear in configuration solely so download and research scripts can reject them.
 
-- `research/` does factor research only. `factors.py` computes the Xingye crowding/consistency and Kaiyuan spider-web indicators by commodity and trading date; `ic_study.py` evaluates time-series IC (`member-ic`), cross-sectional IC (`paper-ic`) and five-day IC (`five-day-ic`). Research builds no positions and imports nothing from `strategies/` or `backtest/`.
-- `strategies/` holds candidate strategies: `rules.py` maps signals to positions (cross-sectional weights, overlapping holds, buffered tails, quantile events, timing directions, budgets and hedges); `buffer.py`, `hold_five.py` and `risk_budget.py` define the books. Strategies may import `research` factors and `backtest`.
-- `backtest/` is a single engine file, `engine.py`. It keeps the integer-lot account, the weight-level cost rates, turnover and metrics, and the command line. It imports only `src/`. `python -m backtest.engine <strategy>` dispatches to a book in `strategies/`.
+## Layers
 
-The liquidity universe (`UNIVERSE`, `eligibility`) and the daily panel cache live in `src/` because all three layers use them. The earlier Guida machine-learning replication has been removed from the code.
+Research computes factors and runs tests. It builds no positions and imports nothing from `strategies/` or `backtest/`.
+
+Strategies turn existing signals into position rules.
+
+The backtest owns the account, execution, costs, and performance. The liquidity universe and the daily panel used by all three layers live in `src/`.
+
+Keep one current strategy. Move a retired design out of the active code and record it in the history document.
+
+## Timing
+
+A factor on day t uses only member ranks and prices known at the close of t.
+
+Weights formed at the close of t first trade at the next session's open.
 
 ## Samples
 
-Research data run from 2010-01-04 to 2021-12-31 under `data/research/`. Backtests and every reported statistic start 2016-01-04. The 2010–2015 period serves only as feature warm-up and training data. Named OOS is 2022-01-01 to 2025-12-31 under `data/oos/`. Both partitions use `minute/`, `daily/`, and `execution/`. Research loaders must call `assert_research_only` before opening a path and `assert_no_holdout_dates` on loaded dates. Keep both and `HoldoutViolation` in `src/config.py`. The path guard excludes all of `data/oos/` and `data/_archive/`. Reading OOS for model evaluation requires an explicit user decision and a new declared protocol.
+2010–2015 is warm-up for trailing windows only. It is not used to choose factors or parameters.
 
-## Research protocol
+Reported statistics and backtests start on 2016-01-04.
 
-The `member-ic` study uses the t+1 dominant contract's opening price on t+1 and the same contract's opening price on t+2. It is unified with `paper-ic` on universe (`eligible` liquidity filter + member rank availability), the full 80-factor set, factor signs, forward return labels, and the 120-day minimum observation requirement (`MIN_DAYS = 120`), differing only in time-series vs cross-sectional correlation slicing. Inputs through t determine the factor. Missing factor/label pairs are excluded, and neutral event signals retain their zero values.
+2022–2025 is a sealed out-of-sample partition. Read it only after an explicit request and a declared evaluation protocol. After reading it, do not revise signs, windows, composites, slot rules, or leverage from those results.
 
-`src/config.py` `UNIVERSE` fixes the liquidity universe. `research/settings.py` `XS_POSITION` fixes factor signs, windows, composite members, cost and the 2016-01-04 evaluation start before results. Commodity crowding is a reversal; consistency, the change in top-20 net-long share, and member position flow are momentum. The later blocks in that dict — five-day overlap, within-symbol z-scores, the 20% tails, the rank band, and the 10- and 60-day overlaps — are separate specifications and are not retuned after their own results. Do not change signs, windows or the composite after seeing returns; a changed rule is a separate, later specification. Report every declared book, including null and adverse findings.
+## Rules are fixed before results
 
-Factors at close t use only member ranks and prices through close t. Weights from close t earn the dominant contract's open-to-open return from the next session; the one-extra-day delay is always reported beside it. Turnover includes dominant-contract roll trades. 2010–2015 are warm-up for trailing percentiles only and are not used to choose factors.
+Fix factor signs, windows, composite members, the liquidity threshold, and cost assumptions before seeing returns.
 
-## Data
+A rule changed after seeing results is a new specification: name it, compute it, and report it on its own.
 
-Raw market files, panels and model caches remain in local `data/` and `runs/research/panel/`, excluded from Git, as is `config/rqdata.env`. Never print, commit or move RiceQuant credentials. In each partition, `getMinutes.py` writes per-symbol Parquet to `minute/`, `getExternal.py` writes daily bars, dominant maps and rankings to `daily/`, `getFeeHistory.py` writes exchange fees to `execution/`, and `getExecutionParameters.py` writes trading parameters and price limits to `execution/parameters/`. The mixed-period minute monolith belongs in `data/_archive/minute_monolith/`. Daily research uses per-contract daily bars. The 88 minute last-bar close differs from the daily close on about 1% of research days.
+Report every book declared in advance, including null and adverse results.
 
-Known data limits: CZCE products renamed after 2012 (MA, ZC, OI, WH, RI) lack pre-rename history; SHFE and some CZCE fees are missing before 2013–2015; a few delivery-month rows have high/low inconsistent with close.
+A parameter grid inside the same evaluation window documents the chosen parameter. It is not out-of-sample evidence.
 
-## Files and validation
+## Tests of predictive content
 
-`docs/research.md` is the single hand-maintained report. Its tables must match the saved CSVs in `runs/research/member_ic/`, `runs/research/xs_position/` (factor IC) and `runs/strategies/<strategy>/` (backtests). Update both together when results change. Match the existing concise Chinese comments and English identifiers. Docstrings, comments and documents use formal research wording and omit the audience or person requesting a change. No new dependencies without asking. Keep focused synthetic tests in `tests/test_core.py`. Tests never read real data.
+Time-series and cross-sectional studies share the universe, the factor set, the signs, the forward-return labels, and the minimum sample. They differ only in whether the correlation is taken through time or across names.
 
-The repository tracks `origin` (github.com/louisprincee/commodityfuture). Do not create branches or commit/push unless explicitly requested; when asked, stage only in-scope files and never `data/`, `config/rqdata.env`, `docs/*.pdf` or model caches.
+Drop a pair when the factor or the label is missing. Keep a zero on a neutral event signal.
 
-Use PYTHONDONTWRITEBYTECODE=1 and pytest -p no:cacheprovider. After checks, delete repository-local `__pycache__`, pytest caches and temporary test directories, verifying resolved paths stay inside the repository. Do not touch raw data or credentials during cleanup.
+Apply Benjamini–Hochberg within a family declared in advance. Keep the primary family and the full-specification family separate. Do not redraw the family boundary after seeing p-values.
 
-## Commands
+## Backtests
 
-The project runs in the `factor-mining` conda environment (Python 3.12).
+Use integer lots and historical commissions. A roll closes the old contract and opens the new one, and both trades enter turnover.
 
-```bash
-python -m pytest tests -p no:cacheprovider
-python -m research panel
-python -m research member-ic --jobs 8
-python -m research paper-ic --jobs 8
-python -m research five-day-ic --jobs 8
-python -m backtest.engine buffer --jobs 8
-python -m backtest.engine hold-five --jobs 8
-python -m backtest.engine risk-budget --jobs 8
-python -m download.getExternal --start-date 20100101 --end-date 20251231
-python -m download.getFeeHistory --partition research
-python -m download.getMinutes -t 20100101-20251231
-```
+The reported case is one tick per side. Save the two-tick case in the result files and leave it out of the report tables.
+
+The target-weight multiplier is an input before orders. Do not describe it as leverage the account has already achieved.
+
+## Data and records
+
+Do not invent a record the vendor does not have, and do not rewrite a published price. Never print, commit, or move the RiceQuant credentials.
+
+`docs/research.md` is the only active report. Change a table and its CSV together.
+
+Add no dependency without asking. Automated tests use synthetic data only and do not read real market files.
+
+## Temporary files and caches
+
+Run Python with `PYTHONDONTWRITEBYTECODE=1` and pytest with `-p no:cacheprovider` where possible. After validation, immediately remove repository-local caches and test temporary directories created by the task, including `__pycache__`, `.pytest_cache`, and `.pytest_tmp`. Inspect exact paths before cleanup; do not touch raw data, `runs/`, credentials, or pre-existing user files.

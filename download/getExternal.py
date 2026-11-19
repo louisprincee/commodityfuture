@@ -274,6 +274,11 @@ def run_download(rq, cache: CoverageCache, start: date, end: date,
     selected, instruments = commodity_instruments(rq, symbols)
     start_s, end_s = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
+    if "member_rank" in datasets:
+        cache.invalidate_empty("member_rank")
+    if "member_rank_contracts" in datasets:
+        cache.invalidate_empty("member_rank_contracts")
+
     if "contracts" in datasets:
         contracts = trading_in(instruments, start, end)["order_book_id"].astype(str).tolist()
         print(f"区间内交易的商品合约: {len(contracts)} 个（共 {len(instruments)} 个）")
@@ -290,14 +295,16 @@ def run_download(rq, cache: CoverageCache, start: date, end: date,
             for side in contract_rank_sides:
                 cache.fetch("member_rank_contracts", f"{contract}_{side}", start, end,
                             lambda left, right, contract=contract, side=side:
-                            member_rank(rq, contract, side, left, right))
+                            member_rank(rq, contract, side, left, right),
+                            require_nonempty=True)
 
     for symbol in tqdm(selected, desc="商品品种"):
         if "member_rank" in datasets:
             for side in MEMBER_SIDES:
                 cache.fetch("member_rank", f"{symbol}_{side}", start, end,
                             lambda left, right, symbol=symbol, side=side:
-                            member_rank(rq, symbol, side, left, right))
+                            member_rank(rq, symbol, side, left, right),
+                            require_nonempty=True)
 
         if "dominant" in datasets:
             for rank in (1, 2):

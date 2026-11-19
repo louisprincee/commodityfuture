@@ -59,15 +59,60 @@ def load_contracts(partition: str = "research", raw_units: bool = False) -> pd.D
         raise ValueError(f"合约代码无法解析品种: {bad}")
     if out.duplicated(["contract", "date"]).any():
         raise ValueError("合约日行情有重复 (contract, date)")
+    if partition == "research":
+        out = apply_legacy_contracts(out)
     _check_dates(out["date"], partition, "合约日行情")
     if not raw_units:
         out = to_single_sided(out)
     return out.sort_values(["symbol", "contract", "date"], kind="mergesort").reset_index(drop=True)
 
 
-def load_dominant(symbol: str, rank: int, partition: str = "research") -> pd.Series:
-    """米筐 get_dominant(rank) 的日序列；上市前为空序列。"""
+# 郑商所更名前代码。只保留后继品种上市日之前的交易日，切换日当天起用新代码。
+LEGACY_UNDERLYING = {
+    "ME": ("MA", pd.Timestamp("2014-06-17")),
+    "TC": ("ZC", pd.Timestamp("2015-05-18")),
+    "RO": ("OI", pd.Timestamp("2012-07-16")),
+    "WS": ("WH", pd.Timestamp("2012-07-24")),
+    "ER": ("RI", pd.Timestamp("2012-07-24")),
+}
+
+
+def legacy_sources(symbol: str) -> list[tuple[str, pd.Timestamp]]:
+    """后继品种在上市日前对应的旧代码。"""
+    return [(old, cut) for old, (new, cut) in LEGACY_UNDERLYING.items() if new == symbol]
+
+
+def apply_legacy_contracts(frame: pd.DataFrame) -> pd.DataFrame:
+    """把更名前合约并入后继品种；切换日及之后的旧代码行不保留。"""
+    if frame.empty or not frame["symbol"].isin(LEGACY_UNDERLYING).any():
+        return frame
+    kept = [frame.loc[~frame["symbol"].isin(LEGACY_UNDERLYING)]]
+    for old, (new, cut) in LEGACY_UNDERLYING.items():
+        part = frame.loc[frame["symbol"].eq(old) & frame["date"].lt(cut)].copy()
+        if part.empty:
+            continue
+        part["symbol"] = new
+        kept.append(part)
+    return pd.concat(kept, ignore_index=True)
+
+
+def stitch_legacy_dominant(current: pd.Series, legacy: pd.Series, cutover: pd.Timestamp) -> pd.Series:
+    """旧主力只补到后继品种上市日前，且不覆盖已有交易日。"""
+    if legacy.empty:
+        return current
+    extra = legacy.loc[legacy.index < cutover]
+    extra = extra.loc[~extra.index.isin(current.index)]
+    if extra.empty:
+        return current
+    out = pd.concat([extra, current]).sort_index()
+    out.name = current.name
+    return out.astype(str)
+
+
+def _read_dominant_file(symbol: str, rank: int, partition: str) -> pd.Series:
     path = external_root(partition) / "dominant" / f"{symbol}_rank{rank}.pkl"
+    if not path.exists():
+        return pd.Series(dtype=object)
     _guard(path, partition)
     obj = pd.read_pickle(path)
     if isinstance(obj, pd.DataFrame):
@@ -77,6 +122,19 @@ def load_dominant(symbol: str, rank: int, partition: str = "research") -> pd.Ser
     obj.name = f"rank{rank}"
     _check_dates(obj.index, partition, f"{symbol} rank{rank}")
     return obj.astype(str)
+
+
+def load_dominant(symbol: str, rank: int, partition: str = "research") -> pd.Series:
+    """米筐 get_dominant(rank) 的日序列；上市前为空序列。研究期把更名前主力接到后继品种。"""
+    path = external_root(partition) / "dominant" / f"{symbol}_rank{rank}.pkl"
+    _guard(path, partition)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    series = _read_dominant_file(symbol, rank, partition)
+    if partition == "research":
+        for old, cut in legacy_sources(symbol):
+            series = stitch_legacy_dominant(series, _read_dominant_file(old, rank, partition), cut)
+    return series
 
 
 def load_roll_yield(symbol: str, partition: str = "research") -> pd.DataFrame:
@@ -110,11 +168,11 @@ def _read_rank(path: Path, partition: str) -> pd.DataFrame:
     return out
 
 
-def load_member_rank(symbol: str, partition: str = "research") -> pd.DataFrame:
-    """品种级前 20 名会员排名长表：trading_date、side、rank、member_name、volume、volume_change。
+def _member_rank_columns() -> list[str]:
+    return ["trading_date", "symbol", "side", "rank", "member_name", "volume", "volume_change"]
 
-    持仓排名为各会员单边持仓，2020 年前后口径一致，不随合约日线折半。
-    """
+
+def _member_rank_frame(symbol: str, partition: str) -> pd.DataFrame:
     root = external_root(partition) / "member_rank"
     parts = []
     for side in MEMBER_SIDES:
@@ -122,10 +180,32 @@ def load_member_rank(symbol: str, partition: str = "research") -> pd.DataFrame:
         if not frame.empty:
             parts.append(frame.assign(side=side))
     if not parts:
-        return pd.DataFrame(columns=["trading_date", "side", "rank", "member_name", "volume", "volume_change"])
+        return pd.DataFrame(columns=_member_rank_columns())
     out = pd.concat(parts, ignore_index=True)
     out["symbol"] = symbol
-    return out[["trading_date", "symbol", "side", "rank", "member_name", "volume", "volume_change"]]
+    return out[_member_rank_columns()]
+
+
+def load_member_rank(symbol: str, partition: str = "research") -> pd.DataFrame:
+    """品种级前 20 名会员排名长表：trading_date、side、rank、member_name、volume、volume_change。
+
+    持仓排名为各会员单边持仓，2020 年前后口径一致，不随合约日线折半。
+    研究期在文件存在时并入更名前代码、且只保留后继品种上市日之前的排名。
+    """
+    out = _member_rank_frame(symbol, partition)
+    if partition != "research":
+        return out
+    extras = []
+    for old, cut in legacy_sources(symbol):
+        extra = _member_rank_frame(old, partition)
+        extra = extra.loc[extra["trading_date"].lt(cut)].copy()
+        if extra.empty:
+            continue
+        extra["symbol"] = symbol
+        extras.append(extra)
+    if not extras:
+        return out
+    return pd.concat([out, *extras], ignore_index=True)
 
 
 def load_member_rank_contracts(symbol: str, partition: str = "research",
@@ -138,15 +218,27 @@ def load_member_rank_contracts(symbol: str, partition: str = "research",
     if not root.exists():
         return pd.DataFrame()
     side_pattern = "|".join(sides)
-    pattern = re.compile(rf"^{re.escape(symbol)}\d{{4}}_({side_pattern})\.pkl$")
+    prefixes = [symbol]
+    cuts: dict[str, pd.Timestamp] = {}
+    if partition == "research":
+        for old, cut in legacy_sources(symbol):
+            prefixes.append(old)
+            cuts[old] = cut
     parts = []
-    for name in sorted(os.listdir(root)):
-        m = pattern.match(name)
-        if not m:
-            continue
-        frame = _read_rank(root / name, partition)
-        if not frame.empty:
-            parts.append(frame.assign(contract=name.rsplit("_", 1)[0], side=m.group(1)))
+    names = sorted(os.listdir(root))
+    for prefix in prefixes:
+        pattern = re.compile(rf"^{re.escape(prefix)}\d{{4}}_({side_pattern})\.pkl$")
+        for name in names:
+            matched = pattern.match(name)
+            if not matched:
+                continue
+            frame = _read_rank(root / name, partition)
+            if frame.empty:
+                continue
+            if prefix in cuts:
+                frame = frame.loc[frame["trading_date"].lt(cuts[prefix])]
+            if not frame.empty:
+                parts.append(frame.assign(contract=name.rsplit("_", 1)[0], side=matched.group(1)))
     if not parts:
         return pd.DataFrame()
     return pd.concat(parts, ignore_index=True)
@@ -305,3 +397,61 @@ def load_panel() -> pd.DataFrame:
     panel = pd.read_parquet(path)
     C.assert_no_holdout_dates(panel["date"], "日面板")
     return panel
+
+
+def load_contracts_span(partition: str = "research") -> pd.DataFrame:
+    """研究期只读研究分区。样本外评价把研究期合约接到样本外之前，供滚动窗口预热。"""
+    if partition == "research":
+        return load_contracts("research")
+    if partition != "oos":
+        raise ValueError(f"未知分区 {partition}")
+    research = load_contracts("research")
+    oos = load_contracts("oos")
+    out = pd.concat([research, oos], ignore_index=True)
+    if out.duplicated(["contract", "date"]).any():
+        raise ValueError("合约日行情在研究期与样本外分区重复")
+    return out.sort_values(["symbol", "contract", "date"], kind="mergesort").reset_index(drop=True)
+
+
+def _concat_rank_frames(research: pd.DataFrame, oos: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    if research.empty:
+        return oos
+    if oos.empty:
+        return research
+    if not research.merge(oos, on=keys, how="inner").empty:
+        raise ValueError("会员排名在研究期与样本外分区重复")
+    return pd.concat([research, oos], ignore_index=True)
+
+
+def load_member_rank_span(symbol: str) -> pd.DataFrame:
+    """样本外因子预热：研究期排名接在样本外排名之前。"""
+    return _concat_rank_frames(
+        load_member_rank(symbol, "research"),
+        load_member_rank(symbol, "oos"),
+        ["trading_date", "side", "rank", "member_name"],
+    )
+
+
+def load_member_rank_contracts_span(symbol: str, sides: tuple[str, ...] = ("long", "short")) -> pd.DataFrame:
+    """样本外因子预热用的合约级排名，研究期在前。"""
+    return _concat_rank_frames(
+        load_member_rank_contracts(symbol, "research", sides),
+        load_member_rank_contracts(symbol, "oos", sides),
+        ["trading_date", "contract", "side", "rank", "member_name"],
+    )
+
+
+def load_evaluation_panel() -> pd.DataFrame:
+    """样本外评价面板。研究期行情只作预热，不写入研究缓存。"""
+    research = load_panel().drop(columns=["eligible"], errors="ignore")
+    oos = build_daily_panel("oos")
+    missing = [column for column in oos.columns if column not in research.columns]
+    if missing:
+        raise ValueError(f"研究期日面板缺少字段: {missing}")
+    panel = pd.concat([research[list(oos.columns)], oos], ignore_index=True)
+    if panel.duplicated(["symbol", "date"]).any():
+        raise ValueError("日面板在研究期与样本外分区重复")
+    panel["eligible"] = eligibility(panel)
+    evaluation = panel.loc[panel["date"].ge(pd.Timestamp(C.OOS_START)), "date"]
+    C.assert_oos_dates(evaluation, "样本外日面板")
+    return panel.sort_values(["date", "symbol"], kind="mergesort").reset_index(drop=True)

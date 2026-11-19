@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import config as C
 import data as D
 
-COMMANDS = ("panel", "member-ic", "paper-ic", "five-day-ic")
+COMMANDS = ("panel", "member-ic", "paper-ic", "five-day-ic", "candidate-ic", "plot-ic")
 
 
 def main(cmd: str, argv: list[str]) -> int:
@@ -19,6 +19,15 @@ def main(cmd: str, argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if cmd == "panel":
         D.build_panel_cache()
+        return 0
+    if cmd == "plot-ic":
+        from research import plot_ic
+        output = C.study_dir("xs_position") / "factor_significance.png"
+        print(f"因子显著性图写入 {plot_ic.run(C.study_dir('xs_position'), C.study_dir('member_ic'), output)}")
+        return 0
+    if cmd == "candidate-ic":
+        from research import economic_ic
+        economic_ic.run(D.load_panel(), C.study_dir("economic_ic"))
         return 0
     from research import ic_study
     panel = D.load_panel()

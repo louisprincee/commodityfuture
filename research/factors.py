@@ -18,10 +18,16 @@ CONSISTENCY_WINDOWS = (20, 60)
 
 # ---------------------------------------------------------------- 基础输入
 
-def member_tables(symbol: str, dates: pd.DatetimeIndex, *, top20: bool = False) -> dict[str, pd.DataFrame]:
+def member_tables(symbol: str, dates: pd.DatetimeIndex, *, top20: bool = False,
+                  partition: str = "research") -> dict[str, pd.DataFrame]:
     """日期 × 会员宽表：多、空持仓，成交量，多、空持仓变化（交易所披露的较前一日变化）。"""
-    ranks = D.load_member_rank(symbol, "research")
-    C.assert_no_holdout_dates(ranks["trading_date"], f"{symbol} 会员排名")
+    if partition == "research":
+        ranks = D.load_member_rank(symbol, "research")
+        C.assert_no_holdout_dates(ranks["trading_date"], f"{symbol} 会员排名")
+    elif partition == "oos":
+        ranks = D.load_member_rank_span(symbol)
+    else:
+        raise ValueError(f"未知分区 {partition}")
     if top20:
         ranks = ranks.loc[ranks["rank"].between(1, 20)]
     members = sorted(ranks["member_name"].unique())

@@ -1,10 +1,10 @@
 """回测引擎：按合约、整数手与日结算价核算 1000 万元账户，权重层面的成本、换手与绩效统计，及策略命令行入口。
 
-    python -m backtest.engine buffer        # 两端入场与中位数缓冲的截面多空对照
-    python -m backtest.engine hold-five     # 五日预测候选的固定周期整数手账户
-    python -m backtest.engine risk-budget   # 低频底仓 + 事件卫星的风险预算组合
+    python -m backtest.engine power_kds
+    python -m backtest.engine power_kds --partition oos
 
-持仓规则在 strategies，因子在 research。只读取 2016–2021 研究期；结果写入 runs/strategies/<策略>/。
+持仓规则在 strategies，因子在 research。默认读取 2016–2021 研究期。
+样本外评价需显式指定 `--partition oos`，并用研究期历史做窗口预热；结果写入 runs/strategies/power_kds/oos/。
 """
 from __future__ import annotations
 
@@ -77,13 +77,20 @@ def _positive_int(value, default):
 
 
 def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path = PARAMETER_CACHE,
-                flat_margin: float | None = None):
+                flat_margin: float | None = None, partition: str = "research"):
     """交易参数与合约日线对齐，成交量容量仅使用截至前日的数据。"""
     if flat_margin is not None and not (0 < flat_margin <= 1):
         raise ValueError("flat_margin 必须在 (0, 1] 内")
-    C.assert_research_only(root)
+    if partition == "research":
+        C.assert_research_only(root)
+        check_dates = C.assert_no_holdout_dates
+    elif partition == "oos":
+        check_dates = C.assert_oos_dates
+    else:
+        raise ValueError(f"未知分区 {partition}")
     names = set(ids)
     bars = bars.loc[bars.contract.isin(names)].sort_values(["contract", "date"]).copy()
+    bars["date"] = pd.to_datetime(bars["date"]).astype("datetime64[ns]")
     bars["prior_volume"] = bars.groupby("contract")["volume"].transform(
         lambda volume: volume.shift(1).rolling(20, min_periods=5).median()
     )
@@ -92,17 +99,19 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
     price_limits = []
     for contract in sorted(names):
         path = root / f"{contract}.pkl"
-        C.assert_research_only(path)
+        if partition == "research":
+            C.assert_research_only(path)
         if path.is_file():
             table = pd.read_pickle(path)
-            C.assert_no_holdout_dates(table.index, f"{contract} 交易参数")
+            check_dates(table.index, f"{contract} 交易参数")
             if not table.empty:
                 tables.append(table.rename_axis("date").reset_index().assign(contract=contract))
         path = root.parent / "price_limits" / f"{contract}.pkl"
-        C.assert_research_only(path)
+        if partition == "research":
+            C.assert_research_only(path)
         if path.is_file():
             table = pd.read_pickle(path)
-            C.assert_no_holdout_dates(table.index, f"{contract} 涨跌停价")
+            check_dates(table.index, f"{contract} 涨跌停价")
             if not table.empty:
                 price_limits.append(table.rename_axis("date").reset_index().assign(contract=contract))
     if not tables:
@@ -113,7 +122,9 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
         raise RuntimeError("历史涨跌停价为空")
     bars = bars.merge(pd.concat(price_limits, ignore_index=True), on=["contract", "date"],
                       how="left", validate="one_to_one")
-    fallback = fees.rename(columns={"trading_date": "date"}).sort_values("date")
+    fallback = fees.rename(columns={"trading_date": "date"}).copy()
+    fallback["date"] = pd.to_datetime(fallback["date"]).astype("datetime64[ns]")
+    fallback = fallback.sort_values("date")
     cols = ["commission_type", "open_commission", "close_commission"]
     specs = ["contract_multiplier", "tick_size"]
     fallback = pd.merge_asof(
@@ -157,10 +168,10 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
 
 def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, neutral=True,
              slippage_ticks=SLIPPAGE_TICKS, rebalance_every=1, phase=0, keep_same_lots=False,
-             name_cap=NAME_CAP):
+             name_cap=NAME_CAP, margin_cap=MARGIN_CAP):
     """按开盘标价和滑点成交，按结算价盯市。先平仓，之后才允许开仓。"""
-    if capital <= 0 or slippage_ticks < 0 or not (0 < name_cap <= 1):
-        raise ValueError("初始本金必须为正，滑点不得为负，单品种上限必须在 (0, 1] 内")
+    if capital <= 0 or slippage_ticks < 0 or not (0 < name_cap <= 1) or not (0 < margin_cap <= 1):
+        raise ValueError("初始本金必须为正，滑点不得为负，单品种上限与保证金上限必须在 (0, 1] 内")
     if rebalance_every < 1 or not 0 <= phase < rebalance_every:
         raise ValueError("调仓周期和起始偏移不匹配")
     dates = contracts.loc[start:].index
@@ -176,6 +187,11 @@ def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, ne
     equity = float(capital)
     positions = {}
     ledger, fills = [], []
+    last_quote: dict[str, pd.Timestamp] = {}
+    for quoted_day, book in market.items():
+        for contract, quote in book.items():
+            if quote.settle > 0 and (contract not in last_quote or quoted_day > last_quote[contract]):
+                last_quote[contract] = quoted_day
     for i, day in enumerate(dates):
         quotes = market.get(day, {})
         prior_equity = equity
@@ -211,7 +227,7 @@ def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, ne
                 np.array([quote.open * quote.multiplier for _, _, _, quote in signals]),
                 np.array([quote.long_margin if value > 0 else quote.short_margin for _, _, value, quote in signals]),
                 np.array([quote.limit for _, _, _, quote in signals]),
-                equity, MARGIN_CAP,
+                equity, margin_cap,
             )
             target = {**keep_pending, **{contract: int(lots) for lots, (contract, _, _, _) in zip(new, signals)}}
             if keep_same_lots:
@@ -233,7 +249,7 @@ def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, ne
                     notional_at_open = abs(lots) * quote.open * quote.multiplier
                     gross_at_open += notional_at_open
                     margin_at_open += notional_at_open * (quote.long_margin if lots > 0 else quote.short_margin)
-                if gross_at_open <= max(equity, 0) and margin_at_open <= MARGIN_CAP * max(equity, 0):
+                if gross_at_open <= max(equity, 0) and margin_at_open <= margin_cap * max(equity, 0):
                     target = retained
             zero_rounded = sum(target[contract] == 0 for contract, _, _, _ in signals)
         elif i < len(dates) - 1:
@@ -263,14 +279,17 @@ def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, ne
                 cancelled += 1
                 limit_rejections += 1
                 return 0
-            capacity = quote.open_cap if opening else quote.exit_cap
+            # A zero client limit forbids carry, so fully liquidate instead of applying the entry-volume cap.
+            capacity = quote.open_cap if opening else (
+                abs(delta) if quote.limit == 0 else quote.exit_cap
+            )
             size = min(abs(delta), quote.max_order, capacity)
             if opening:
                 ratio = quote.long_margin if delta > 0 else quote.short_margin
                 unit_fee = quote.open_fee * (1 if quote.by_lot else quote.open * quote.multiplier)
                 unit_cost = quote.tick * slippage_ticks * quote.multiplier + unit_fee
-                margin_room = max(0, MARGIN_CAP * max(equity, 0) - margin_used())
-                size = min(size, floor(margin_room / (quote.open * quote.multiplier * ratio + MARGIN_CAP * unit_cost)))
+                margin_room = max(0, margin_cap * max(equity, 0) - margin_used())
+                size = min(size, floor(margin_room / (quote.open * quote.multiplier * ratio + margin_cap * unit_cost)))
             if (opening and size < quote.min_order) or size <= 0:
                 cancelled += 1
                 return 0
@@ -305,7 +324,16 @@ def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, ne
             desired = target.get(contract, 0)
             keep = (1 if lots > 0 else -1) * min(abs(lots), abs(desired)) if lots * desired > 0 else 0
             if keep != lots:
-                remaining = lots + order(contract, symbol, keep - lots, False)
+                quote = quotes.get(contract)
+                if quote and quote.limit == 0:
+                    remaining = lots
+                    while remaining != keep:
+                        filled = order(contract, symbol, keep - remaining, False)
+                        if filled == 0:
+                            break
+                        remaining += filled
+                else:
+                    remaining = lots + order(contract, symbol, keep - lots, False)
                 if remaining:
                     positions[contract] = (remaining, basis, multiplier, symbol)
                 else:
@@ -332,6 +360,9 @@ def simulate(weights, contracts, market, start, delay=0, capital=CAPITAL_CNY, ne
                 positions[contract] = (lots, quote.settle, multiplier, symbol)
             else:
                 stale += 1
+                # 合约已无后续行情时按最近结算价结束；中间缺一天则保留持仓。
+                if last_quote.get(contract, day) <= day:
+                    del positions[contract]
         notional = sum(lots * basis * mult for lots, basis, mult, _ in positions.values())
         gross = sum(abs(lots) * basis * mult for lots, basis, mult, _ in positions.values())
         margin = margin_used()
@@ -503,24 +534,225 @@ def metrics(r: pd.Series, turnover: pd.Series | None = None) -> dict:
     return out
 
 
+def plot_equity_drawdown(
+    equity: pd.DataFrame,
+    out_path: Path,
+    *,
+    strategy: str,
+    benchmark: str,
+    period_label: str = "研究期",
+) -> Path:
+    """绘制对数累计净值、回撤及逐年收益对照图。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import FixedLocator, FuncFormatter, LogLocator, NullFormatter
+
+    missing = {strategy, benchmark} - set(equity.columns)
+    if missing:
+        raise KeyError(f"权益曲线缺少绘图序列: {sorted(missing)}")
+    frame = equity.loc[:, [strategy, benchmark]].apply(pd.to_numeric, errors="coerce")
+    if (
+        len(frame) < 2
+        or not isinstance(frame.index, pd.DatetimeIndex)
+        or frame.index.has_duplicates
+        or not frame.index.is_monotonic_increasing
+        or not np.isfinite(frame.to_numpy(dtype=float)).all()
+        or (frame <= 0).any().any()
+    ):
+        raise ValueError("绘图权益曲线必须包含至少两日、日期有序且为正的完整数据")
+
+    nav = frame / CAPITAL_CNY
+    drawdown = nav.div(nav.cummax().clip(lower=1.0)) - 1.0
+    colors = {strategy: "#5B98B2", benchmark: "#CB8957"}
+    labels = {
+        strategy: "策略组合",
+        benchmark: "等权基准",
+    }
+    annual_returns = {}
+    summary = {}
+    for column in nav:
+        previous = 1.0
+        annual_returns[column] = {}
+        for year, values in nav[column].groupby(nav.index.year, sort=True):
+            ending = float(values.iloc[-1])
+            annual_returns[column][year] = ending / previous - 1.0
+            previous = ending
+        daily_returns = nav[column].pct_change(fill_method=None).dropna()
+        annualized_return = float(daily_returns.mean() * TD) if len(daily_returns) else np.nan
+        annualized_volatility = (
+            float(daily_returns.std() * np.sqrt(TD)) if len(daily_returns) > 1 else np.nan
+        )
+        summary[column] = {
+            "ann_return": annualized_return,
+            "sharpe": annualized_return / annualized_volatility
+            if annualized_volatility > 0 else np.nan,
+            "max_drawdown": float(drawdown[column].min()),
+        }
+    annual = pd.DataFrame(annual_returns).sort_index()
+
+    with plt.rc_context({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Heiti SC", "Arial Unicode MS", "DejaVu Sans"],
+        "axes.unicode_minus": False,
+        "font.size": 10.5,
+        "text.color": "#293e4c",
+        "axes.labelcolor": "#5c6d79",
+        "xtick.color": "#657682",
+        "ytick.color": "#657682",
+        "figure.facecolor": "#ffffff",
+        "axes.facecolor": "#ffffff",
+        "savefig.facecolor": "#ffffff",
+    }):
+        figure = plt.figure(figsize=(13.6, 7.6))
+        grid = figure.add_gridspec(
+            2, 2, height_ratios=(2.35, 1), width_ratios=(2.15, 1),
+            left=0.068, right=0.968, top=0.695, bottom=0.095, hspace=0.24, wspace=0.20,
+        )
+        nav_axis = figure.add_subplot(grid[0, 0])
+        drawdown_axis = figure.add_subplot(grid[1, 0], sharex=nav_axis)
+        year_axis = figure.add_subplot(grid[:, 1])
+        dates = nav.index.to_numpy(dtype="datetime64[ns]")
+        for column in nav.columns:
+            nav_axis.plot(
+                nav.index, nav[column], color=colors[column],
+                linewidth=1.65, solid_capstyle="round",
+            )
+            drawdown_axis.plot(
+                drawdown.index, drawdown[column], color=colors[column],
+                linewidth=1.2,
+            )
+
+        drawdown_axis.fill_between(
+            dates, drawdown[strategy].to_numpy(dtype=float), 0,
+            color=colors[strategy], alpha=0.1, linewidth=0,
+        )
+        drawdown_axis.axhline(0, color="#aab8c4", linewidth=0.7)
+        for axis in (nav_axis, drawdown_axis, year_axis):
+            axis.set_axisbelow(True)
+            axis.spines[["top", "right"]].set_visible(False)
+            axis.spines[["left", "bottom"]].set_color("#d7e0e6")
+            axis.tick_params(length=0, pad=7)
+        for axis in (nav_axis, drawdown_axis):
+            axis.grid(axis="y", color="#e6ecf0", linewidth=0.7)
+            axis.grid(axis="x", color="#eff3f6", linewidth=0.6)
+
+        nav_axis.set_yscale("log")
+        nav_min, nav_max = float(nav.min().min()), float(nav.max().max())
+        nav_ticks = np.array([0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0])
+        nav_ticks = nav_ticks[(nav_ticks >= nav_min * 0.88) & (nav_ticks <= nav_max * 1.12)]
+        if len(nav_ticks) >= 3:
+            nav_axis.yaxis.set_major_locator(FixedLocator(nav_ticks))
+        else:
+            nav_axis.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5)))
+        nav_axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}×"))
+        nav_axis.yaxis.set_minor_formatter(NullFormatter())
+        nav_axis.set_title("累计净值", loc="left", fontsize=11, fontweight="bold", pad=10)
+        plt.setp(nav_axis.get_xticklabels(), visible=False)
+        nav_axis.tick_params(axis="y", labelsize=9.5)
+        drawdown_axis.set_title("回撤", loc="left", fontsize=10.5, fontweight="bold", pad=8)
+        drawdown_axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.0%}"))
+        year_starts = pd.date_range(
+            start=f"{nav.index.min().year}-01-01",
+            end=f"{nav.index.max().year}-01-01",
+            freq="YS",
+        )
+        tick_dates = pd.DatetimeIndex([nav.index.min(), *year_starts[year_starts > nav.index.min()]])
+        drawdown_axis.set_xticks(tick_dates)
+        drawdown_axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        drawdown_axis.set_xlim(nav.index.min(), nav.index.max())
+
+        years = annual.index.to_numpy()
+        positions = np.arange(len(years))
+        bar_height = 0.72 / len(annual.columns)
+        for i, column in enumerate(annual.columns):
+            values = annual[column].to_numpy(dtype=float) * 100
+            offsets = positions + (i - (len(annual.columns) - 1) / 2) * bar_height
+            year_axis.barh(offsets, values, height=bar_height * 0.82, color=colors[column], linewidth=0)
+            for y, value in zip(offsets, values):
+                year_axis.annotate(
+                    f"{value:+.1f}%", (value, y),
+                    xytext=(4 if value >= 0 else -4, 0), textcoords="offset points",
+                    ha="left" if value >= 0 else "right", va="center",
+                    fontsize=8.2, color="#526571",
+                )
+        year_axis.set_yticks(positions, [str(year) for year in years])
+        year_axis.tick_params(axis="y", labelsize=9.5)
+        year_axis.set_ylim(len(years) - 0.5, -0.5)
+        year_axis.axvline(0, color="#aab8c4", linewidth=0.8)
+        year_axis.grid(axis="x", color="#e6ecf0", linewidth=0.7)
+        low, high = float(annual.min().min() * 100), float(annual.max().max() * 100)
+        span = max(high - low, 10.0)
+        year_axis.set_xlim(
+            min(0.0, low) - (max(span * 0.24, 8.0) if low < 0 else 4.0),
+            max(0.0, high) + (max(span * 0.24, 8.0) if high > 0 else 4.0),
+        )
+        year_axis.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}%"))
+        year_axis.set_title("逐年净收益", loc="left", fontsize=11, fontweight="bold", pad=10)
+
+        figure.suptitle("策略净值与等权基准", x=0.068, y=0.962, ha="left", va="top",
+                        fontsize=14.5, fontweight="bold", color="#293e4c")
+        figure.text(
+            0.068, 0.908,
+            f"{strategy}  |  {period_label}  |  {nav.index.min():%Y-%m-%d} — {nav.index.max():%Y-%m-%d}  |  单边 1 tick",
+            va="top", fontsize=9.5, color="#697c89",
+        )
+        for x, label in zip((0.71, 0.84, 0.968), ("Sharpe", "年化收益", "最大回撤")):
+            figure.text(x, 0.848, label, ha="right", va="center", fontsize=9, color="#697c89")
+        for i, column in enumerate(nav.columns):
+            y = 0.812 - i * 0.036
+            figure.add_artist(Line2D(
+                [0.068, 0.084], [y, y],
+                transform=figure.transFigure, color=colors[column], linewidth=2.2,
+            ))
+            figure.text(0.092, y, labels[column], va="center", fontsize=10, color="#425968")
+            for x, key, fmt in zip(
+                (0.71, 0.84, 0.968),
+                ("sharpe", "ann_return", "max_drawdown"),
+                (".3f", ".1%", ".1%"),
+            ):
+                figure.text(
+                    x, y, format(summary[column][key], fmt), ha="right", va="center",
+                    fontsize=10, fontweight="semibold", color=colors[column],
+                )
+        figure.add_artist(Line2D(
+            [0.068, 0.968], [0.748, 0.748], transform=figure.transFigure,
+            color="#e2e8ed", linewidth=0.8,
+        ))
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(out_path, dpi=180, facecolor=figure.get_facecolor())
+        plt.close(figure)
+    return out_path
+
+
 # ---------------------------------------------------------------- 命令行入口
 
 STRATEGIES = {
-    "buffer": "strategies.buffer",
-    "hold-five": "strategies.hold_five",
-    "risk-budget": "strategies.risk_budget",
+    "power_kds": "strategies.power_kds",
 }
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m backtest.engine")
-    parser.add_argument("strategy", choices=list(STRATEGIES))
+    parser.add_argument("strategy", nargs="?", choices=list(STRATEGIES), default="power_kds")
+    parser.add_argument("--partition", choices=("research", "oos"), default="research")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args(argv)
     from importlib import import_module
 
     module = import_module(STRATEGIES[args.strategy])
-    module.run(D.load_panel(), C.RESEARCH_FEE_PATH, C.strategy_dir(module.STRATEGY_ID), jobs=args.jobs)
+    if args.partition == "oos":
+        panel = D.load_evaluation_panel()
+        fee_path = C.OOS_FEE_PATH
+        out = C.strategy_dir(module.STRATEGY_ID) / "oos"
+    else:
+        panel = D.load_panel()
+        fee_path = C.RESEARCH_FEE_PATH
+        out = C.strategy_dir(module.STRATEGY_ID)
+    module.run(panel, fee_path, out, jobs=args.jobs, partition=args.partition)
     return 0
 
 

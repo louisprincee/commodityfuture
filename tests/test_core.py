@@ -94,6 +94,34 @@ def test_lot_targets_round_to_zero_and_leave_margin_reserve():
     np.testing.assert_array_equal(result, [5, -6, 0])
 
 
+def test_strategy_summary_calmar_uses_annual_return_and_absolute_drawdown():
+    from strategies.power_kds import _eval_book
+
+    returns = pd.Series([0.10, -0.05, 0.02], index=pd.bdate_range("2020-01-01", periods=3))
+    equity = P.CAPITAL_CNY * (1 + returns).cumprod()
+    daily = pd.DataFrame({
+        "return": returns,
+        "turnover": 0.0,
+        "equity": equity,
+        "gross_pnl": 0.0,
+        "fees": 0.0,
+        "slippage": 0.0,
+        "gross_notional": 0.0,
+        "net_notional": 0.0,
+        "margin_fraction": 0.0,
+        "open_contracts": 0,
+        "stale_marks": 0,
+    })
+    benchmark = pd.Series([0.0, 0.01, -0.01], index=returns.index)
+
+    result = _eval_book("TEST", "combo", 0, 1, daily, benchmark)
+
+    assert result["max_drawdown"] == pytest.approx(-0.05)
+    cagr = (equity.iloc[-1] / P.CAPITAL_CNY) ** (P.TD / len(returns)) - 1
+    assert result["calmar"] == pytest.approx(cagr / 0.05)
+    assert result["sortino"] == pytest.approx(P.metrics(returns)["sortino"])
+
+
 def test_execution_roll_closes_old_and_opens_new_with_separate_fees():
     from backtest.engine import Quote, simulate
 
@@ -112,6 +140,84 @@ def test_execution_roll_closes_old_and_opens_new_with_separate_fees():
     assert roll.loc[calls["A"], "fee"] == 27
     assert roll.loc[calls["B"], "fee"] == 40
     assert daily.iloc[-1]["open_contracts"] == 0
+
+
+def test_expired_contract_leaves_the_book_but_a_one_day_gap_does_not():
+    from backtest.engine import Quote, simulate
+
+    dates = pd.bdate_range("2021-12-01", periods=5)
+    contracts = pd.DataFrame({"A": ["A2201"] * 2 + ["A2205"] * 3}, index=dates)
+    weights = pd.DataFrame({"A": [.2, .2, 0, 0, 0]}, index=dates)
+
+    def quote(price):
+        return Quote(price, price, 10, 1, .1, .1, True, 0, 0, 1, 100, 100)
+
+    expired = {
+        dates[0]: {"A2201": quote(100)},
+        dates[1]: {"A2201": quote(110)},
+        dates[2]: {},
+        dates[3]: {},
+        dates[4]: {},
+    }
+    daily, _ = simulate(weights, contracts, expired, dates[0], capital=100_000, neutral=False, slippage_ticks=0)
+    assert daily.loc[dates[1], "open_contracts"] == 1
+    assert daily.loc[dates[2], "stale_marks"] == 1
+    assert daily.loc[dates[2], "open_contracts"] == 0
+    assert daily.loc[dates[3:], "stale_marks"].eq(0).all()
+    assert daily.loc[dates[2], "equity"] == pytest.approx(daily.loc[dates[1], "equity"])
+
+    same = pd.DataFrame({"A": ["A2201"] * 5}, index=dates)
+    held = pd.DataFrame({"A": [.2, .2, .2, .2, .2]}, index=dates)
+    gapped = {
+        dates[0]: {"A2201": quote(100)},
+        dates[1]: {"A2201": quote(110)},
+        dates[2]: {},
+        dates[3]: {"A2201": quote(110)},
+        dates[4]: {"A2201": quote(112)},
+    }
+    daily, _ = simulate(held, same, gapped, dates[0], capital=100_000, neutral=False, slippage_ticks=0)
+    assert daily.loc[dates[2], "stale_marks"] == 1
+    assert daily.loc[dates[2], "open_contracts"] == 1
+    assert daily.loc[dates[3], "open_contracts"] == 1
+    assert daily.loc[dates[3], "stale_marks"] == 0
+
+
+def test_zero_client_limit_forces_full_expiry_exit():
+    from backtest.engine import Quote, simulate
+
+    dates = pd.bdate_range("2022-05-09", periods=4)
+    contracts = pd.DataFrame(
+        {"ZC": ["ZC2205", "ZC2205", "ZC2205", "ZC2209"]}, index=dates
+    )
+    weights = pd.DataFrame({"ZC": [0.05] * len(dates)}, index=dates)
+
+    def quote(price, client_limit, max_order=100):
+        return Quote(
+            price, price, 10, 1, 0.1, 0.1, True, 1, 1, 1, max_order,
+            client_limit, open_cap=100, exit_cap=1,
+        )
+
+    market = {
+        dates[0]: {"ZC2205": quote(100, 100)},
+        dates[1]: {"ZC2205": quote(100, 100)},
+        dates[2]: {"ZC2205": quote(90, 0, max_order=3)},
+        dates[3]: {"ZC2209": quote(90, 100)},
+    }
+
+    daily, fills = simulate(
+        weights, contracts, market, dates[0], capital=100_000,
+        neutral=False, slippage_ticks=1,
+    )
+
+    expiry_fills = fills.loc[fills["date"].eq(dates[2])]
+    assert expiry_fills["trade_lots"].sum() == -5
+    assert expiry_fills["action"].eq("close").all()
+    assert expiry_fills["notional"].sum() == pytest.approx(4_500)
+    assert expiry_fills["fee"].sum() == pytest.approx(5)
+    assert expiry_fills["slippage"].sum() == pytest.approx(50)
+    assert daily.loc[dates[2], "turnover"] > 0
+    assert daily.loc[dates[2], "stale_marks"] == 0
+    assert daily.loc[dates[3], "open_contracts"] == 0
 
 
 def test_execution_carries_old_contract_if_a_sell_is_blocked_at_limit_down():
@@ -188,18 +294,6 @@ def test_paper_spider_aggregates_contracts_and_uses_disclosed_contract_oi():
     assert result["SPIDER_HOLIDAY"].iloc[0] == 1
     assert result["SPIDER_FREE"].iloc[1] != result["SPIDER_FREE"].iloc[1]
     assert result["K_NET_SHARE"].iloc[0] == pytest.approx(0.1)
-
-
-def test_paper_rank_buffer_keeps_incumbent_until_middle():
-    from strategies.rules import buffered_tails
-
-    scores = pd.DataFrame([[5, 4, 3, 2, 1], [4, 5, 3, 2, 1], [2, 5, 4, 3, 1]])
-    regular = buffered_tails(scores, min_names=5, buffered=False)
-    buffered = buffered_tails(scores, min_names=5, buffered=True)
-    assert regular.iloc[1, 0] == 0
-    assert buffered.iloc[1, 0] > 0
-    assert buffered.iloc[2, 0] == 0
-    np.testing.assert_allclose(buffered.sum(axis=1), 0)
 
 
 def synthetic_panel(n_days: int = 400, symbols=("AA", "BB", "CC", "DD"), seed: int = 0) -> pd.DataFrame:
@@ -286,21 +380,6 @@ def test_eligibility_ignores_future_turnover():
     past = panel["date"] <= cut
     pd.testing.assert_series_equal(before[past], after[past])
     assert before[past].iloc[-1]
-
-
-def test_crowding_cross_section_shorts_the_crowded_name():
-    score = pd.DataFrame([[0.2, 0.8]], columns=["quiet", "crowded"]) * -1
-    weights = R.score_to_weights(score).iloc[0]
-    assert weights["quiet"] > 0 > weights["crowded"]
-
-
-def test_weights_legs_and_monotone():
-    score = pd.DataFrame([[0.1, 0.4, 0.6, 0.9, np.nan]], columns=list("abcde"))
-    weights = R.score_to_weights(score).iloc[0]
-    assert weights[weights > 0].sum() == pytest.approx(1.0)
-    assert weights[weights < 0].sum() == pytest.approx(-1.0)
-    assert weights["e"] == 0
-    assert weights["a"] < weights["b"] < 0 < weights["c"] < weights["d"]
 
 
 def test_backtest_timing_and_roll_cost():
@@ -418,6 +497,35 @@ def test_member_rank_daily_uses_ranked_contract_oi(monkeypatch):
     assert out["top20_long"] == 500.0 and out["top20_short"] == 400.0
     assert out["ranked_oi"] == 1000.0 and out["n_ranked_contracts"] == 1
     assert out["total_oi"] == 1600.0
+
+
+def test_member_rank_download_rejects_empty_and_invalidates_empty_cache(tmp_path):
+    from download.getExternal import CoverageCache
+    import datetime as dt
+
+    root = tmp_path / "daily"
+    cache_dir = root / "member_rank"
+    cache_dir.mkdir(parents=True)
+    empty_path = cache_dir / "A_long.pkl"
+    empty_path.write_bytes(b"")
+    with empty_path.open("wb") as stream:
+        pd.to_pickle(pd.DataFrame(), stream)
+
+    cache = CoverageCache(root)
+    cache._entry("member_rank", "A_long")["coverage"] = [["20220101", "20251231"]]
+    cache.flush()
+    cache.invalidate_empty("member_rank")
+    assert not empty_path.exists()
+    assert cache.manifest["items"]["member_rank/A_long"]["coverage"] == []
+
+    cache.fetch(
+        "member_rank", "A_long",
+        dt.date(2022, 1, 1), dt.date(2022, 1, 2),
+        lambda left, right: pd.DataFrame(),
+        require_nonempty=True,
+    )
+    assert not empty_path.exists()
+    assert cache.manifest["items"]["member_rank/A_long"]["coverage"] == []
 
 
 def _member_tables(dates, long_pos, short_pos, volume, d_long=None, d_short=None):
@@ -550,37 +658,16 @@ def test_execution_retains_same_direction_lots_and_reconciles_equity():
     )
 
 
-def test_risk_budget_weights_hedging_and_causal_inverse_vol():
-    from strategies.rules import (
-        active_weights,
-        hedge_against_benchmark,
-        inverse_vol_weights,
-    )
+def test_active_weights_respects_min_slots():
+    from strategies.rules import active_weights
 
-    dates = pd.bdate_range("2021-01-04", periods=30)
+    dates = pd.bdate_range("2021-01-04", periods=2)
     dirs = pd.DataFrame(0.0, index=dates, columns=["A", "B", "C", "D"])
     dirs.iloc[0, 0] = 1.0
     dirs.iloc[1, :3] = [1.0, 1.0, -1.0]
     w = active_weights(dirs, min_slots=2)
     assert w.iloc[0].tolist() == [0.5, 0.0, 0.0, 0.0]
     assert w.iloc[1].tolist() == pytest.approx([1 / 3, 1 / 3, -1 / 3, 0.0])
-
-    elig = pd.DataFrame(True, index=dates, columns=["A", "B", "C", "D"])
-    hedged = hedge_against_benchmark(w, elig)
-    np.testing.assert_allclose(hedged.sum(axis=1), 0.0, atol=1e-12)
-    assert hedged.iloc[0].tolist() == pytest.approx([0.375, -0.125, -0.125, -0.125])
-
-    r_core = pd.Series(0.01 * np.sin(np.arange(30)), index=dates)
-    r_sat = pd.Series(0.03 * np.cos(np.arange(30)), index=dates)
-    wc, ws = inverse_vol_weights(r_core, r_sat, window=10, min_periods=5, floor=0.2)
-    assert (wc.iloc[:5] == 0.5).all()
-    assert wc.iloc[-1] > ws.iloc[-1]
-    np.testing.assert_allclose(wc + ws, 1.0)
-    # 篡改最后一日收益不得影响当日权重
-    r_sat_tampered = r_sat.copy()
-    r_sat_tampered.iloc[-1] = 10.0
-    wc2, _ = inverse_vol_weights(r_core, r_sat_tampered, window=10, min_periods=5, floor=0.2)
-    assert wc2.iloc[-1] == pytest.approx(wc.iloc[-1])
 
 
 def test_execution_parameters_partition_guards():
@@ -594,3 +681,239 @@ def test_execution_parameters_partition_guards():
         gep._check_dates(pd.to_datetime(["2022-01-04"]), "research", "test")
     with pytest.raises(C.HoldoutViolation):
         gep._check_dates(pd.to_datetime(["2021-12-31"]), "oos", "test")
+
+
+def test_load_market_accepts_different_datetime_resolutions(tmp_path):
+    from backtest.engine import load_market
+
+    dates = pd.to_datetime(["2021-12-29", "2021-12-30"]).astype("datetime64[us]")
+    contract = "AA2201"
+    root = tmp_path / "parameters" / "contracts"
+    root.mkdir(parents=True)
+    parameters = pd.DataFrame({
+        "long_margin_ratio": [.1, .1],
+        "short_margin_ratio": [.1, .1],
+        "commission_type": ["by_volume", "by_volume"],
+        "open_commission": [1., 1.],
+        "close_commission": [1., 1.],
+        "max_order_quantity": [100, 100],
+        "min_order_quantity": [1, 1],
+        "client_limit": [100, 100],
+    }, index=dates)
+    parameters.to_pickle(root / f"{contract}.pkl")
+    price_limits = pd.DataFrame({"limit_up": [120., 120.], "limit_down": [80., 80.]}, index=dates)
+    price_limit_root = root.parent / "price_limits"
+    price_limit_root.mkdir()
+    price_limits.to_pickle(price_limit_root / f"{contract}.pkl")
+    bars = pd.DataFrame({
+        "date": dates,
+        "contract": contract,
+        "open": [100., 101.],
+        "settlement": [100., 101.],
+        "volume": [1000., 1000.],
+    })
+    fees = pd.DataFrame({
+        "trading_date": pd.to_datetime(["2021-12-29"]).astype("datetime64[ns]"),
+        "contract": [contract],
+        "commission_type": ["by_volume"],
+        "open_commission": [1.],
+        "close_commission": [1.],
+        "contract_multiplier": [10.],
+        "tick_size": [1.],
+    })
+
+    market = load_market(bars, fees, {contract}, dates[0], root=root)
+
+    assert market[pd.Timestamp("2021-12-29")][contract].multiplier == 10
+
+
+def test_economic_candidate_factors_exclude_recent_month_and_lag_inventory():
+    from research.economic_ic import momentum_12_1, warehouse_draw_20
+
+    dates = pd.bdate_range("2015-01-01", periods=284)
+    returns = pd.Series(0.0, index=dates)
+    returns.loc[dates[242:263]] = 0.01
+    momentum = momentum_12_1(returns)
+    assert momentum.loc[dates[262]] == pytest.approx(0.0)
+    assert momentum.loc[dates[283]] == pytest.approx((1.01 ** 21) - 1)
+
+    stock = pd.Series(100.0, index=dates)
+    stock.loc[dates[21]] = 90.0
+    oi = pd.Series(200.0, index=dates)
+    inventory_draw = warehouse_draw_20(stock, oi)
+    assert inventory_draw.loc[dates[21]] == pytest.approx(0.0)
+    assert inventory_draw.loc[dates[22]] == pytest.approx(0.05)
+
+
+def test_candidate_factor_matrix_aligns_roll_yield_momentum_and_warehouse(tmp_path):
+    from research.economic_ic import candidate_factors
+
+    dates = pd.bdate_range("2015-01-01", periods=284)
+    returns = np.zeros(len(dates))
+    returns[242:263] = 0.01
+    panel = pd.DataFrame({
+        "date": dates,
+        "symbol": "CU",
+        "ret1": returns,
+        "oi_total": 200.0,
+        "roll_yield_ann": 0.02,
+    })
+    warehouse_dir = tmp_path / "warehouse"
+    warehouse_dir.mkdir()
+    stock = np.full(len(dates), 100.0)
+    stock[21] = 90.0
+    warehouse = pd.DataFrame(
+        {"on_warrant": stock},
+        index=pd.MultiIndex.from_arrays(
+            [dates.strftime("%Y%m%d"), np.repeat("CU", len(dates))],
+            names=["date", "underlying_symbol"],
+        ),
+    )
+    warehouse.to_pickle(warehouse_dir / "CU.pkl")
+
+    factors = candidate_factors(panel, warehouse_dir)
+
+    assert factors.at[dates[100], ("ROLL_YIELD", "CU")] == pytest.approx(0.02)
+    assert factors.at[dates[262], ("MOM_12_1", "CU")] == pytest.approx(0.0)
+    assert factors.at[dates[283], ("MOM_12_1", "CU")] == pytest.approx((1.01 ** 21) - 1)
+    assert factors.at[dates[22], ("WAREHOUSE_DRAW_20", "CU")] == pytest.approx(0.05)
+
+
+def test_simulate_margin_cap_and_power_kds_weights():
+    from backtest.engine import Quote, simulate
+    from strategies.power_kds import power_kds_weights
+
+    dates = pd.bdate_range("2021-12-01", periods=3)
+    contracts = pd.DataFrame({"A": "A2201"}, index=dates)
+    weights = pd.DataFrame({"A": [1.0, 0.0, 0.0]}, index=dates)
+    # 100 * 10 = 1000 名义，80% 保证金 -> 每手保证金 800；权重 1.0 目标 100 手(80% 保证金)，50% 上限=62 手，100% 上限=100 手
+    market = {d: {"A2201": Quote(100, 100, 10, 1, 0.80, 0.80, True, 0, 0, 1, 10000, 10000)} for d in dates}
+    _, fills_50 = simulate(weights, contracts, market, dates[0], capital=100_000,
+                           neutral=False, slippage_ticks=0, name_cap=1.0, margin_cap=0.50)
+    _, fills_100 = simulate(weights, contracts, market, dates[0], capital=100_000,
+                            neutral=False, slippage_ticks=0, name_cap=1.0, margin_cap=1.00)
+    assert fills_50.iloc[0]["trade_lots"] == 62
+    assert fills_100.iloc[0]["trade_lots"] == 100
+    with pytest.raises(ValueError):
+        simulate(weights, contracts, market, dates[0], margin_cap=1.2)
+
+    elig = pd.DataFrame(True, index=dates, columns=["A", "B"])
+    z = pd.DataFrame({"A": [1.5, 1.2, 0.5], "B": [0.0, -1.5, -0.5]}, index=dates)
+    raw = pd.DataFrame({"A": [1.0, 1.0, 1.0], "B": [0.0, -1.0, -1.0]}, index=dates)
+    shock = pd.DataFrame({"A": [1.0, 0.0, 0.0], "B": [-1.0, 0.0, 0.0]}, index=dates)
+    wc, ws, w50 = power_kds_weights(z, raw, shock, elig, horizon=2)
+    np.testing.assert_allclose(w50.to_numpy(), (0.5 * wc + 0.5 * ws).to_numpy())
+
+
+def test_flow_control_ablation_preserves_fixed_leg_budgets():
+    from strategies.power_kds import flow_ablation_weights, power_kds_weights
+
+    dates = pd.bdate_range("2021-12-01", periods=3)
+    eligible = pd.DataFrame(True, index=dates, columns=["A", "B"])
+    z_power = pd.DataFrame({"A": [1.5, 1.2, 0.5], "B": [-1.5, -1.2, -0.5]}, index=dates)
+    raw_power = pd.DataFrame({"A": [1.0, 1.0, 1.0], "B": [-1.0, -1.0, -1.0]}, index=dates)
+    shock = pd.DataFrame({"A": [1.0, 0.0, 0.0], "B": [0.0, 0.0, 0.0]}, index=dates)
+    z_flow = pd.DataFrame({"A": [0.0, 1.5, 0.0], "B": [0.0, -1.5, 0.0]}, index=dates)
+    raw_flow = pd.DataFrame({"A": [0.0, 1.0, 0.0], "B": [0.0, -1.0, 0.0]}, index=dates)
+
+    w_core, w_shock, _ = power_kds_weights(z_power, raw_power, shock, eligible, horizon=2)
+    flow_direction = R.timing_directions(z_flow, raw_flow)
+    w_flow = R.hold_cohorts(R.active_weights(flow_direction), 2)
+    ablations = flow_ablation_weights(
+        z_power, raw_power, shock, z_flow, raw_flow, eligible, horizon=2
+    )
+
+    np.testing.assert_allclose(
+        ablations["POWER_KDS_FLOW_REPLACES_SAT_2X"].to_numpy(),
+        (0.5 * w_core + 0.5 * w_flow).to_numpy(),
+    )
+    np.testing.assert_allclose(
+        ablations["POWER_KDS_FLOW_502525_2X"].to_numpy(),
+        (0.5 * w_core + 0.25 * w_shock + 0.25 * w_flow).to_numpy(),
+    )
+
+
+def test_power_kds_weights_can_normalize_by_actual_active_count():
+    from strategies.power_kds import power_kds_weights
+
+    dates = pd.bdate_range("2022-01-03", periods=1)
+    eligible = pd.DataFrame(True, index=dates, columns=["A", "B"])
+    z_power = pd.DataFrame({"A": [1.5], "B": [0.0]}, index=dates)
+    raw_power = pd.DataFrame({"A": [1.0], "B": [0.0]}, index=dates)
+    shock = pd.DataFrame({"A": [1.0], "B": [0.0]}, index=dates)
+
+    core_default, _, combined_default = power_kds_weights(
+        z_power, raw_power, shock, eligible, horizon=1,
+    )
+    core_actual, _, combined_actual = power_kds_weights(
+        z_power, raw_power, shock, eligible, horizon=1, min_slots=1,
+    )
+
+    assert core_default.loc[dates[0], "A"] == pytest.approx(0.1)
+    assert core_actual.loc[dates[0], "A"] == pytest.approx(1.0)
+    assert combined_default.loc[dates[0], "A"] == pytest.approx(0.1)
+    assert combined_actual.loc[dates[0], "A"] == pytest.approx(1.0)
+
+
+def test_equity_drawdown_plot_compares_strategy_with_equal_weight_on_log_scale(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    dates = pd.bdate_range("2021-12-27", periods=4)
+    equity = pd.DataFrame({
+        "strategy": [10_000_000, 12_400_000, 6_000_000, 10_500_000],
+        "benchmark": [10_000_000, 10_500_000, 10_300_000, 11_000_000],
+    }, index=dates)
+    closed_figures = []
+    close = plt.close
+
+    def capture_figure(*args, **kwargs):
+        closed_figures.append(plt.gcf())
+        close(*args, **kwargs)
+
+    monkeypatch.setattr(plt, "close", capture_figure)
+
+    path = P.plot_equity_drawdown(
+        equity, tmp_path / "performance.png", strategy="strategy", benchmark="benchmark",
+        period_label="样本外",
+    )
+
+    assert path.is_file()
+    assert path.stat().st_size > 0
+    assert len(closed_figures[-1].axes) == 3
+    assert closed_figures[-1].axes[0].get_yscale() == "log"
+    assert any("样本外" in text.get_text() for text in closed_figures[-1].texts)
+    closed_figures[-1].canvas.draw()
+    nav_tick_labels = {
+        tick.get_text() for tick in closed_figures[-1].axes[0].get_yticklabels()
+    }
+    assert {"0.75×", "1×", "1.25×"} <= nav_tick_labels
+
+
+def test_legacy_contracts_stop_at_successor_listing_date():
+    frame = pd.DataFrame({
+        "symbol": ["ME", "ME", "MA", "RB"],
+        "date": pd.to_datetime(["2014-06-16", "2014-06-17", "2014-06-17", "2014-06-16"]),
+        "contract": ["ME1501", "ME1501", "MA1506", "RB1410"],
+    })
+    out = D.apply_legacy_contracts(frame)
+    assert out["symbol"].tolist() == ["MA", "RB", "MA"]
+    assert out["contract"].tolist() == ["MA1506", "RB1410", "ME1501"]
+
+
+def test_legacy_dominant_does_not_overwrite_successor_days():
+    current = pd.Series(["MA1506", "MA1506"], index=pd.to_datetime(["2014-06-17", "2014-06-18"]), name="rank1")
+    legacy = pd.Series(["ME1505", "ME1505", "ME1505"], index=pd.to_datetime(["2014-06-16", "2014-06-17", "2014-06-18"]))
+    out = D.stitch_legacy_dominant(current, legacy, pd.Timestamp("2014-06-17"))
+    assert out.tolist() == ["ME1505", "MA1506", "MA1506"]
+    assert str(out.index.min().date()) == "2014-06-16"
+
+
+def test_calendar_year_return_uses_prior_year_end_equity():
+    from strategies.power_kds import calendar_year_returns
+
+    equity = pd.DataFrame({
+        "A": [100.0, 110.0, 121.0, 100.0],
+    }, index=pd.to_datetime(["2016-01-04", "2016-12-30", "2017-01-03", "2017-12-29"]))
+    out = calendar_year_returns(equity).set_index(["book", "year"])["return"]
+    assert out[("A", 2016)] == pytest.approx(0.10)
+    assert out[("A", 2017)] == pytest.approx(100.0 / 110.0 - 1.0)

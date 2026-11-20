@@ -37,6 +37,7 @@ import pandas as pd
 
 import config as C
 import data as D
+from research import factors as F
 from research.economic_ic import candidate_factors
 from research.ic_study import _bh, _rank_corr, forward_returns, return_matrix
 
@@ -120,6 +121,81 @@ def _member_factors(path: Path, oi: pd.DataFrame) -> dict[str, pd.DataFrame]:
     }
 
 
+def _evaluate_family(scores: dict[str, pd.DataFrame], labels: dict[int, pd.DataFrame],
+                     states: pd.DataFrame, family_map: dict[str, str],
+                     sign_map: dict[str, int], q_col: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+    """按给定因子集计算 5/10/20 日截面 IC、BH 校正及 R1–R5 稳健性表。"""
+    rows, yearly, legs_yearly, daily_ic = [], [], [], {}
+    for name, score in scores.items():
+        turnover = membership_turnover(score)
+        for h in HORIZONS:
+            ic, count = _rank_corr(score, labels[h], MIN_NAMES)
+            lags = max(20, 2 * h)
+            t = hac_t(ic, lags)
+            legs = leg_returns(score, labels[h])
+            long_x, short_x = legs["top"] - legs["pool"], legs["pool"] - legs["bottom"]
+            row = dict(
+                factor=name, family=family_map[name], sign=sign_map[name], horizon=h,
+                mean_ic=ic.mean(), hac_t=t, p=math.erfc(abs(t) / math.sqrt(2)) if np.isfinite(t) else np.nan,
+                days=int(ic.count()), avg_names=count.mean(), ic_ir=ic.mean() / ic.std(),
+                ic_2016_2018=ic.loc[:"2018"].mean(), ic_2019_2021=ic.loc["2019":].mean(),
+                long_excess_bp=1e4 * long_x.mean(), long_t=hac_t(long_x, lags),
+                short_excess_bp=1e4 * short_x.mean(), short_t=hac_t(short_x, lags),
+                spread_bp=1e4 * (legs["top"] - legs["bottom"]).mean(),
+                tail_turnover=turnover,
+            )
+            for col in states:
+                flag = states[col]
+                row[f"ic_{col}"] = ic.where(flag.eq(True)).mean()
+                row[f"ic_not_{col}"] = ic.where(flag.eq(False)).mean()
+            rows.append(row)
+            by_year = ic.groupby(ic.index.year).mean()
+            yearly.extend(dict(factor=name, horizon=h, year=int(y), mean_ic=v) for y, v in by_year.items())
+            ly = pd.DataFrame({"long": long_x, "short": short_x}).groupby(long_x.index.year).mean() * 1e4
+            legs_yearly.extend(dict(factor=name, horizon=h, year=int(y), long_bp=r.long, short_bp=r.short)
+                               for y, r in ly.iterrows())
+            daily_ic[(name, h)] = ic
+
+    result = pd.DataFrame(rows)
+    result[q_col] = _bh(result["p"])
+    yearly_df = pd.DataFrame(yearly)
+    legs_yearly_df = pd.DataFrame(legs_yearly)
+    judge = result.loc[result.horizon.eq(JUDGE_H)].set_index("factor")
+    pos_years = yearly_df.loc[yearly_df.horizon.eq(JUDGE_H)].groupby("factor")["mean_ic"].apply(lambda s: int(s.gt(0).sum()))
+    checks = pd.DataFrame({
+        "R1_q_any": result.groupby("factor")[q_col].min().lt(0.05),
+        "R2_trend": judge["ic_trend_up"].gt(0) & judge["ic_not_trend_up"].gt(0),
+        "R3_vol": judge["ic_vol_high"].gt(0) & judge["ic_not_vol_high"].gt(0),
+        "R4_years": pos_years.ge(5),
+        "R5_legs": judge["long_excess_bp"].gt(0) & judge["short_excess_bp"].gt(0),
+        "positive_years": pos_years,
+    }).reindex(list(sign_map))
+    checks["robust"] = checks[["R1_q_any", "R2_trend", "R3_vol", "R4_years", "R5_legs"]].all(axis=1)
+    return result, yearly_df, legs_yearly_df, checks, daily_ic
+
+
+def seat_purified_scores(panel: pd.DataFrame, contracts: pd.DataFrame,
+                         dates: pd.DatetimeIndex, symbols: list[str],
+                         eligible: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """独立事后检验族：按 CROWD1 换手门槛拆分的 STICKY_NET_SHARE 与 SPEC_NET_SHARE。"""
+    sticky = pd.DataFrame(np.nan, index=dates, columns=symbols)
+    spec = pd.DataFrame(np.nan, index=dates, columns=symbols)
+    rank_root = C.daily_dir("research") / "member_rank"
+    for sym in symbols:
+        if not (rank_root / f"{sym}_long.pkl").is_file():
+            continue
+        mkt = F.market_inputs(panel, contracts, sym).reindex(dates)
+        tables = F.member_tables(sym, dates, top20=True, partition="research")
+        split = F.sticky_net_share(tables, mkt)
+        sticky[sym] = split["STICKY_NET_SHARE"]
+        spec[sym] = split["SPEC_NET_SHARE"]
+    sample = dates[dates >= START]
+    return {
+        "STICKY_NET_SHARE": sticky.replace([np.inf, -np.inf], np.nan).where(eligible).loc[sample],
+        "SPEC_NET_SHARE": spec.replace([np.inf, -np.inf], np.nan).where(eligible).loc[sample],
+    }
+
+
 def build_inputs(member_path: Path):
     panel = D.load_panel()
     C.assert_no_holdout_dates(panel["date"], "截面稳健性日面板")
@@ -143,7 +219,8 @@ def build_inputs(member_path: Path):
     sample = dates[dates >= START]
     scores = {k: (v * SIGNS[k]).replace([np.inf, -np.inf], np.nan).where(eligible).loc[sample] for k, v in raw.items()}
 
-    bars = D.load_contracts("research")[["contract", "date", "open"]]
+    contracts = D.load_contracts("research")
+    bars = contracts[["contract", "date", "open"]]
     returns = return_matrix(wide("c1_contract")[symbols], bars.set_index(["contract", "date"])["open"])
     labels = {h: forward_returns(returns, h).loc[sample] for h in HORIZONS}
     labels[1] = returns.shift(-1).loc[sample]
@@ -156,61 +233,18 @@ def build_inputs(member_path: Path):
         "trend_up": trend.gt(0).where(trend.notna()),
         "vol_high": vol.gt(vol_med).where(vol_med.notna()),
     }).loc[sample]
-    return scores, labels, states, ret1
+    seat_scores = seat_purified_scores(panel, contracts, dates, symbols, eligible)
+    return scores, labels, states, ret1, seat_scores
 
 
 def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     member_path = member_path or C.study_dir("member_ic") / "daily_factors_and_returns.csv"
     C.assert_research_only(member_path)
-    scores, labels, states, _ = build_inputs(member_path)
+    scores, labels, states, _, seat_scores = build_inputs(member_path)
 
-    rows, yearly, legs_yearly, daily_ic = [], [], [], {}
-    for name, score in scores.items():
-        turnover = membership_turnover(score)
-        for h in HORIZONS:
-            ic, count = _rank_corr(score, labels[h], MIN_NAMES)
-            lags = max(20, 2 * h)
-            t = hac_t(ic, lags)
-            legs = leg_returns(score, labels[h])
-            long_x, short_x = legs["top"] - legs["pool"], legs["pool"] - legs["bottom"]
-            row = dict(
-                factor=name, family=FAMILY[name], sign=SIGNS[name], horizon=h,
-                mean_ic=ic.mean(), hac_t=t, p=math.erfc(abs(t) / math.sqrt(2)) if np.isfinite(t) else np.nan,
-                days=int(ic.count()), avg_names=count.mean(), ic_ir=ic.mean() / ic.std(),
-                long_excess_bp=1e4 * long_x.mean(), long_t=hac_t(long_x, lags),
-                short_excess_bp=1e4 * short_x.mean(), short_t=hac_t(short_x, lags),
-                spread_bp=1e4 * (legs["top"] - legs["bottom"]).mean(),
-                tail_turnover=turnover,
-            )
-            for col in states:
-                flag = states[col]
-                row[f"ic_{col}"] = ic.where(flag.eq(True)).mean()
-                row[f"ic_not_{col}"] = ic.where(flag.eq(False)).mean()
-            rows.append(row)
-            by_year = ic.groupby(ic.index.year).mean()
-            yearly.extend(dict(factor=name, horizon=h, year=int(y), mean_ic=v) for y, v in by_year.items())
-            ly = pd.DataFrame({"long": long_x, "short": short_x}).groupby(long_x.index.year).mean() * 1e4
-            legs_yearly.extend(dict(factor=name, horizon=h, year=int(y), long_bp=r.long, short_bp=r.short)
-                               for y, r in ly.iterrows())
-            daily_ic[(name, h)] = ic
-
-    result = pd.DataFrame(rows)
-    result["q_primary"] = _bh(result["p"])
-    yearly = pd.DataFrame(yearly)
-    legs_yearly = pd.DataFrame(legs_yearly)
-
-    judge = result.loc[result.horizon.eq(JUDGE_H)].set_index("factor")
-    pos_years = yearly.loc[yearly.horizon.eq(JUDGE_H)].groupby("factor")["mean_ic"].apply(lambda s: int(s.gt(0).sum()))
-    checks = pd.DataFrame({
-        "R1_q_any": result.groupby("factor")["q_primary"].min().lt(0.05),
-        "R2_trend": judge["ic_trend_up"].gt(0) & judge["ic_not_trend_up"].gt(0),
-        "R3_vol": judge["ic_vol_high"].gt(0) & judge["ic_not_vol_high"].gt(0),
-        "R4_years": pos_years.ge(5),
-        "R5_legs": judge["long_excess_bp"].gt(0) & judge["short_excess_bp"].gt(0),
-        "positive_years": pos_years,
-    }).reindex(list(SIGNS))
-    checks["robust"] = checks[["R1_q_any", "R2_trend", "R3_vol", "R4_years", "R5_legs"]].all(axis=1)
-
+    result, yearly, legs_yearly, checks, daily_ic = _evaluate_family(
+        scores, labels, states, FAMILY, SIGNS, "q_primary",
+    )
     ranked = {k: v.rank(axis=1, pct=True) for k, v in scores.items()}
     corr = pd.DataFrame({a: {b: _rank_corr(ranked[a], ranked[b], MIN_NAMES)[0].mean() for b in ranked} for a in ranked})
 
@@ -230,6 +264,15 @@ def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
                 tail_turnover=membership_turnover(comp), positive_years=int(ic.groupby(ic.index.year).mean().gt(0).sum()),
             ))
 
+    seat_signs = {"STICKY_NET_SHARE": 1, "SPEC_NET_SHARE": 1}
+    seat_family = {k: "seat_purified" for k in seat_signs}
+    seat_res, _, _, seat_checks, _ = _evaluate_family(
+        seat_scores, labels, states, seat_family, seat_signs, "q_seat",
+    )
+    seat_out = seat_res.merge(
+        seat_checks.add_prefix("chk_"), left_on="factor", right_index=True, how="left",
+    )
+
     out.mkdir(parents=True, exist_ok=True)
     result.to_csv(out / "factor_horizons.csv", index=False)
     yearly.to_csv(out / "ic_by_year.csv", index=False)
@@ -237,5 +280,6 @@ def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     checks.to_csv(out / "robustness_checks.csv")
     corr.to_csv(out / "factor_rank_correlation.csv")
     pd.DataFrame(composite_rows).to_csv(out / "composite.csv", index=False)
+    seat_out.to_csv(out / "seat_purified.csv", index=False)
     pd.DataFrame({f"{k}_d{h}": v for (k, h), v in daily_ic.items()}).to_csv(out / "daily_ic.csv", index_label="date")
     return result

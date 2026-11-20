@@ -80,8 +80,15 @@ def test_lot_targets_round_to_zero_and_leave_margin_reserve():
     np.testing.assert_array_equal(result, [5, -6, 0])
 
 
-def test_flow_basis_summary_uses_equity_drawdown_and_backtest_sortino():
-    from strategies.flow_basis import _summary
+def test_sticky_core_keeps_only_two_times_book():
+    from strategies.sticky_core import BOOKS, MAIN_BOOK
+
+    assert BOOKS == {"STICKY_CORE_2X": (2.0, 0.20)}
+    assert MAIN_BOOK == "STICKY_CORE_2X"
+
+
+def test_sticky_core_summary_uses_equity_drawdown_and_backtest_sortino():
+    from strategies.sticky_core import _summary
 
     returns = pd.Series([0.10, -0.05, 0.02], index=pd.bdate_range("2020-01-01", periods=3))
     equity = P.CAPITAL_CNY * (1 + returns).cumprod()
@@ -741,8 +748,8 @@ def test_simulate_margin_cap():
         simulate(weights, contracts, market, dates[0], margin_cap=1.2)
 
 
-def test_flow_basis_cohorts_average_daily_cross_sections():
-    from strategies.flow_basis import hold_cohorts
+def test_sticky_core_cohorts_average_daily_cross_sections():
+    from strategies.sticky_core import hold_cohorts
 
     dates = pd.bdate_range("2021-12-01", periods=3)
     weights = pd.DataFrame({"A": [0.5, -0.5, 0.0]}, index=dates)
@@ -804,7 +811,7 @@ def test_legacy_dominant_does_not_overwrite_successor_days():
 
 
 def test_calendar_year_return_uses_prior_year_end_equity():
-    from strategies.flow_basis import _yearly_returns
+    from strategies.sticky_core import _yearly_returns
 
     equity = pd.DataFrame({
         "A": [P.CAPITAL_CNY, 1.1 * P.CAPITAL_CNY, 1.21 * P.CAPITAL_CNY, P.CAPITAL_CNY],
@@ -881,37 +888,48 @@ def test_active_flow_uses_volume_board_members_and_blanks_missing_open_interest(
     assert pd.isna(result.at[day, "flow"])
 
 
-def test_flow_basis_tails_leave_vetoed_slots_in_cash():
-    from strategies.flow_basis import tail_weights
+def test_sticky_net_share_separates_sticky_and_one_sided_seats_from_high_turnover():
+    from research.factors import sticky_net_share
+
+    days = pd.bdate_range("2020-01-01", periods=2)
+    cols = ["STICKY_LONG", "ONE_SIDED_SHORT", "CHURNER"]
+    # Market turnover = volume / oi = 100 / 200 = 0.50 on day 0
+    mkt = pd.DataFrame({"volume": [100.0, 100.0], "oi": [200.0, 200.0]}, index=days)
+    # STICKY_LONG: L=40, S=10, V=10 -> V/(L+S)=0.20 < 0.50 -> kept in sticky
+    # ONE_SIDED_SHORT: L=NaN, S=30, V=NaN -> not high-turnover -> kept in sticky
+    # CHURNER: L=20, S=10, V=50 -> V/(L+S)=1.67 >= 0.50 -> moved to SPEC_NET_SHARE
+    tables = {
+        "L": pd.DataFrame([[40.0, np.nan, 20.0], [np.nan, np.nan, np.nan]], index=days, columns=cols),
+        "S": pd.DataFrame([[10.0, 30.0, 10.0], [np.nan, np.nan, np.nan]], index=days, columns=cols),
+        "V": pd.DataFrame([[10.0, np.nan, 50.0], [np.nan, np.nan, np.nan]], index=days, columns=cols),
+        "ranked": pd.Series([True, False], index=days),
+    }
+    out = sticky_net_share(tables, mkt)
+    # Day 0 sticky: net=(40-10)+(0-30)=0, gross=50+30=80 -> 0.0; spec: net=10, gross=30 -> 1/3
+    assert out.loc[days[0], "STICKY_NET_SHARE"] == pytest.approx(0.0)
+    assert out.loc[days[0], "SPEC_NET_SHARE"] == pytest.approx(10.0 / 30.0)
+    assert np.isnan(out.loc[days[1], "STICKY_NET_SHARE"])
+    assert np.isnan(out.loc[days[1], "SPEC_NET_SHARE"])
+
+
+def test_sticky_core_tails_allocate_equal_half_gross_per_leg():
+    from strategies.sticky_core import tail_weights
 
     days = pd.bdate_range("2020-01-01", periods=2)
     names = [f"S{i}" for i in range(10)]
     score = pd.DataFrame(np.tile(np.arange(10.0), (2, 1)), index=days, columns=names)
     score.iloc[1, 3:] = np.nan
-    veto_long = pd.DataFrame(False, index=days, columns=names)
-    veto_short = veto_long.copy()
-    veto_long.loc[days[0], "S9"] = True
-    weights = tail_weights(score, veto_long, veto_short)
+    weights = tail_weights(score)
     row = weights.loc[days[0]]
-    assert row["S9"] == 0 and row["S8"] == pytest.approx(0.25)
+    assert row["S9"] == pytest.approx(0.25) and row["S8"] == pytest.approx(0.25)
     assert row["S0"] == pytest.approx(-0.25) and row["S1"] == pytest.approx(-0.25)
-    assert row.abs().sum() == pytest.approx(0.75)
+    assert row.sum() == pytest.approx(0.0)
+    assert row.abs().sum() == pytest.approx(1.0)
     assert weights.loc[days[1]].eq(0).all()
 
 
-def test_flow_basis_crowd_veto_uses_past_quantiles_and_blocks_missing():
-    from strategies import flow_basis as S
-
-    days = pd.bdate_range("2020-01-01", periods=S.MIN_OBSERVATIONS + 2)
-    crowd = pd.DataFrame({"A": np.r_[np.linspace(0, 1, S.MIN_OBSERVATIONS), 2.0, np.nan]}, index=days)
-    veto_long, veto_short = S.crowd_vetoes(crowd)
-    assert veto_long["A"].iloc[: S.MIN_OBSERVATIONS].all()
-    assert bool(veto_long["A"].iloc[-2]) and not bool(veto_short["A"].iloc[-2])
-    assert bool(veto_long["A"].iloc[-1]) and bool(veto_short["A"].iloc[-1])
-
-
-def test_flow_basis_score_ranks_only_candidates():
-    from strategies.flow_basis import FACTORS, composite_score
+def test_sticky_core_score_ranks_only_candidates():
+    from strategies.sticky_core import FACTORS, composite_score
 
     day = pd.DatetimeIndex(["2020-01-02"])
     cols = list("ABCD")
@@ -925,8 +943,8 @@ def test_flow_basis_score_ranks_only_candidates():
     assert np.isnan(score["D"])
 
 
-def test_flow_basis_cohorts_hold_ten_batches():
-    from strategies.flow_basis import HORIZON, hold_cohorts
+def test_sticky_core_cohorts_hold_ten_batches():
+    from strategies.sticky_core import HORIZON, hold_cohorts
 
     days = pd.bdate_range("2020-01-01", periods=HORIZON + 1)
     weights = pd.DataFrame({"A": [1.0] + [0.0] * HORIZON}, index=days)
@@ -935,30 +953,37 @@ def test_flow_basis_cohorts_hold_ten_batches():
     assert held.iloc[-1] == 0
 
 
-def test_flow_basis_cumulative_flow_needs_full_window_and_uses_current_open_interest():
-    from strategies.flow_basis import cumulative_flow
+def test_build_daily_panel_oos_carries_research_prior_close_across_boundary(monkeypatch):
+    res_dates = pd.to_datetime(["2021-12-30", "2021-12-31"])
+    oos_dates = pd.to_datetime(["2022-01-04", "2022-01-05"])
+    res_df = pd.DataFrame({
+        "contract": ["RB2205", "RB2205", "RB2210", "RB2210"],
+        "date": list(res_dates) * 2,
+        "symbol": ["RB"] * 4,
+        "close": [4000.0, 4050.0, 3900.0, 3920.0],
+        "total_turnover": [1e9] * 4,
+        "open_interest": [1e5] * 4,
+        "volume": [1e5] * 4,
+    })
+    oos_df = pd.DataFrame({
+        "contract": ["RB2205", "RB2205", "RB2210", "RB2210"],
+        "date": list(oos_dates) * 2,
+        "symbol": ["RB"] * 4,
+        "close": [4090.5, 4131.405, 3959.2, 3998.792],
+        "total_turnover": [1e9] * 4,
+        "open_interest": [1e5] * 4,
+        "volume": [1e5] * 4,
+    })
+    monkeypatch.setattr(D, "load_contracts", lambda part="research": res_df if part == "research" else oos_df)
+    monkeypatch.setattr(D, "symbols_with_data", lambda part="research": ["RB"])
+    monkeypatch.setattr(D, "load_dominant", lambda sym, rank=1, part="research": pd.Series(
+        ["RB2205" if rank == 1 else "RB2210"] * 2, index=oos_dates, name=f"rank{rank}",
+    ))
+    monkeypatch.setattr(D, "load_roll_yield", lambda sym, part="research": pd.DataFrame())
 
-    days = pd.bdate_range("2020-01-01", periods=5)
-    flow = pd.DataFrame({"A": [1.0, 2.0, 3.0, np.nan, 5.0]}, index=days)
-    oi = pd.DataFrame({"A": [10.0, 10.0, 20.0, 20.0, 40.0]}, index=days)
-    out = cumulative_flow(flow, oi, window=2)["A"]
-    assert np.isnan(out.iloc[0])
-    assert out.iloc[1] == pytest.approx(3.0 / 10.0)
-    assert out.iloc[2] == pytest.approx(5.0 / 20.0)
-    assert np.isnan(out.iloc[3]) and np.isnan(out.iloc[4])
-
-
-def test_flow_basis_score_weights_three_factors_equally_within_candidates():
-    from strategies.flow_basis import FACTORS, composite_score
-
-    day = pd.DatetimeIndex(["2020-01-02"])
-    cols = list("ABC")
-    values = {
-        FACTORS[0]: pd.DataFrame([[1.0, 2.0, 3.0]], index=day, columns=cols),
-        FACTORS[1]: pd.DataFrame([[1.0, 2.0, 3.0]], index=day, columns=cols),
-        FACTORS[2]: pd.DataFrame([[3.0, 2.0, 1.0]], index=day, columns=cols),
-    }
-    candidates = pd.DataFrame(True, index=day, columns=cols)
-    score = composite_score(values, candidates).iloc[0]
-    assert score["A"] == pytest.approx((1 / 3 + 1 / 3 + 1) / 3)
-    assert score["C"] == pytest.approx((1 + 1 + 1 / 3) / 3)
+    out = D.build_daily_panel("oos")
+    assert out["date"].tolist() == list(oos_dates)
+    assert out.loc[0, "c1_prev_close"] == pytest.approx(4050.0)
+    assert out.loc[0, "c2_prev_close"] == pytest.approx(3920.0)
+    assert out.loc[0, "ret1"] == pytest.approx(4090.5 / 4050.0 - 1.0)
+    assert out.loc[0, "ret2"] == pytest.approx(3959.2 / 3920.0 - 1.0)

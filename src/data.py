@@ -307,6 +307,7 @@ def build_daily_panel(partition: str = "research", symbols: list[str] | None = N
     等价于论文的比例法后复权；主力 rank1 由米筐按前一交易日数据确定。
     """
     contracts = load_contracts(partition)
+    leg_contracts = load_contracts_span(partition)
     symbols = symbols or symbols_with_data(partition)
     totals = contracts.groupby(["symbol", "date"]).agg(
         oi_total=("open_interest", "sum"), turnover_total=("total_turnover", "sum"),
@@ -318,7 +319,7 @@ def build_daily_panel(partition: str = "research", symbols: list[str] | None = N
             continue
         r2 = load_dominant(symbol, 2, partition).reindex(r1.index)
         r2 = r2.where(r2 != r1)  # 米筐偶有次主力等于主力的日子，置空
-        sub = contracts[contracts["symbol"] == symbol]
+        sub = leg_contracts[leg_contracts["symbol"] == symbol]
         leg1 = _leg(sub, r1, "c1_")
         leg2 = _leg(sub, r2.dropna(), "c2_").reindex(r1.index)
         frame = leg1.join(leg2)
@@ -451,7 +452,10 @@ def load_evaluation_panel() -> pd.DataFrame:
     panel = pd.concat([research[list(oos.columns)], oos], ignore_index=True)
     if panel.duplicated(["symbol", "date"]).any():
         raise ValueError("日面板在研究期与样本外分区重复")
+    panel = panel.sort_values(["date", "symbol"], kind="mergesort").reset_index(drop=True)
+    panel["roll"] = panel.groupby("symbol")["c1_contract"].transform(lambda s: s.ne(s.shift()))
+    panel.loc[panel.groupby("symbol").cumcount() == 0, "roll"] = False
     panel["eligible"] = eligibility(panel)
     evaluation = panel.loc[panel["date"].ge(pd.Timestamp(C.OOS_START)), "date"]
     C.assert_oos_dates(evaluation, "样本外日面板")
-    return panel.sort_values(["date", "symbol"], kind="mergesort").reset_index(drop=True)
+    return panel

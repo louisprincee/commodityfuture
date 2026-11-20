@@ -1,6 +1,6 @@
 """回测引擎：按合约、整数手与日结算价核算 1000 万元账户，权重层面的成本、换手与绩效统计，及策略命令行入口。
 
-    python -m backtest.engine flow_basis
+    python -m backtest.engine sticky_core
 
 持仓规则在 strategies，因子在 research。默认读取 2016–2021 研究期。
 样本外评价需显式指定 `--partition oos`，并用研究期历史做预热；结果写入对应策略目录。
@@ -577,7 +577,11 @@ def plot_equity_drawdown(
         annual_returns[column] = {}
         for year, values in nav[column].groupby(nav.index.year, sort=True):
             ending = float(values.iloc[-1])
-            annual_returns[column][year] = ending / previous - 1.0
+            starting = float(values.iloc[0])
+            if year == nav.index.min().year:
+                annual_returns[column][year] = ending / starting - 1.0
+            else:
+                annual_returns[column][year] = ending / previous - 1.0
             previous = ending
         daily_returns = nav[column].pct_change(fill_method=None).dropna()
         annualized_return = float(daily_returns.mean() * TD) if len(daily_returns) else np.nan
@@ -730,14 +734,14 @@ def plot_equity_drawdown(
 # ---------------------------------------------------------------- 命令行入口
 
 STRATEGIES = {
-    "flow_basis": "strategies.flow_basis",
+    "sticky_core": "strategies.sticky_core",
 }
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m backtest.engine")
-    parser.add_argument("strategy", nargs="?", choices=list(STRATEGIES), default="flow_basis")
-    parser.add_argument("--partition", choices=("research", "oos"), default="research")
+    parser.add_argument("strategy", nargs="?", choices=list(STRATEGIES), default="sticky_core")
+    parser.add_argument("--partition", choices=("research", "oos", "combined"), default="research")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args(argv)
     from importlib import import_module
@@ -747,10 +751,13 @@ def main(argv: list[str]) -> int:
         panel = D.load_evaluation_panel()
         fee_path = C.OOS_FEE_PATH
         out = C.strategy_dir(module.STRATEGY_ID) / "oos"
+    elif args.partition == "combined":
+        module.run_combined(C.strategy_dir(module.STRATEGY_ID))
+        return 0
     else:
         panel = D.load_panel()
         fee_path = C.RESEARCH_FEE_PATH
-        out = C.strategy_dir(module.STRATEGY_ID)
+        out = C.strategy_dir(module.STRATEGY_ID) / "research"
     module.run(panel, fee_path, out, jobs=args.jobs, partition=args.partition)
     return 0
 

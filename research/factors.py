@@ -96,6 +96,31 @@ def crowding_indicators(t: dict[str, pd.DataFrame], mkt: pd.DataFrame) -> pd.Dat
     return pd.DataFrame({"CROWD1": c1, "CROWD2": c2, "CROWD3": c3})
 
 
+def sticky_net_share(t: dict[str, pd.DataFrame], mkt: pd.DataFrame) -> pd.DataFrame:
+    """按 CROWD1 换手门槛拆分粘性持仓席位（STICKY_NET_SHARE）与高换手活跃席位（SPEC_NET_SHARE）。"""
+    L = t["L"].fillna(0.0)
+    S = t["S"].fillna(0.0)
+    V = t["V"].fillna(0.0)
+    has_day = t["ranked"].to_numpy(dtype=bool)[:, None]
+    gross = L + S
+    net = L - S
+    oi = mkt["oi"].where(mkt["oi"] > 0)
+    mkt_to = mkt["volume"] / oi
+    high_to = t["V"].notna() & gross.gt(0) & (V / gross.where(gross.gt(0))).ge(mkt_to, axis=0)
+    sticky = has_day & gross.gt(0) & (~high_to)
+    spec = has_day & gross.gt(0) & high_to
+
+    def share(mask: pd.DataFrame) -> pd.Series:
+        num = net.where(mask).sum(axis=1, min_count=1)
+        den = gross.where(mask).sum(axis=1, min_count=1)
+        return num / den.where(den.gt(0))
+
+    return pd.DataFrame({
+        "STICKY_NET_SHARE": share(sticky),
+        "SPEC_NET_SHARE": share(spec),
+    }, index=L.index)
+
+
 def crowding(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:
     """兴业原文拥挤度口径：逐侧绝对变动。市场成交量已统一为单边，三榜的缺失不视为零。"""
     long, short, volume = (tables[name] for name in ("L", "S", "V"))
@@ -380,5 +405,6 @@ def symbol_factors(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,
     return pd.concat([
         *parts,
         (flow / oi).rename("FLOW_CONTROL"),
+        sticky_net_share(tables, market),
         spider_signal(tables, active_only=True).rename("SPIDER_ACTIVE_PROXY"),
     ], axis=1)

@@ -22,7 +22,7 @@ LABEL_FIELDS = ("entry_date", "exit_date", "entry_contract", "entry_open", "exit
 MIN_DAYS = 120
 MIN_SECTOR_NAMES = 5
 HAC_LAGS = 20
-HORIZONS = {"d1": (1, 0), "d5": (5, 0), "d2_to_d5": (4, 1), "d5_delayed": (5, 1)}
+HORIZONS = {"d1": 1, "d5": 5}
 
 
 # ---------------------------------------------------------------- 公共工具
@@ -43,11 +43,11 @@ def forward_open_returns(dominant: pd.Series, opens: pd.Series) -> pd.DataFrame:
     }, index=dominant.index)
 
 
-def forward_returns(returns: pd.DataFrame, horizon: int, delay: int) -> pd.DataFrame:
-    """信号日之后的逐日主力开盘收益连乘，任何单日缺失则整段缺失。"""
-    if horizon < 1 or delay < 0:
-        raise ValueError("累计收益窗口或延迟无效")
-    legs = (1 + returns.shift(-(1 + delay + offset)) for offset in range(horizon))
+def forward_returns(returns: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    """信号日之后连续 horizon 段主力开盘收益连乘，任何单日缺失则整段缺失。"""
+    if horizon < 1:
+        raise ValueError("累计收益窗口必须为正")
+    legs = (1 + returns.shift(-(1 + offset)) for offset in range(horizon))
     return reduce(mul, legs) - 1
 
 
@@ -239,7 +239,7 @@ def run_paper_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
     eligible = eligible.reindex_like(returns).astype("boolean").fillna(False).astype(bool)
     sector_series = pd.Series({s: C.SECTOR[s] for s in symbols})
     sectors = {str(name): list(group.index) for name, group in sector_series.groupby(sector_series)}
-    forward = {delay: returns.shift(-(1 + delay)).loc[calendar] for delay in (0, 1)}
+    outcome = returns.shift(-1).loc[calendar]
     daily, rows, ts_rows, coverage = {}, [], [], []
 
     for name in pieces[0].columns:
@@ -255,31 +255,30 @@ def run_paper_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
         })
         for norm, variant in variants.items():
             masked = variant.where(eligible).loc[calendar]
-            for delay, outcome in forward.items():
-                sector_ic = []
-                for scope, cols in {"all": symbols, **sectors}.items():
-                    least = XS["min_names"] if scope == "all" else MIN_SECTOR_NAMES
-                    ic, count = _rank_corr(masked[cols], outcome[cols], least)
-                    rows.append(dict(factor=name, family=family, norm=norm, scope=scope, delay=delay,
-                                     **_stats(ic, count)))
-                    daily[(name, norm, scope, delay)] = ic
-                    if scope != "all":
-                        sector_ic.append(ic.rename(scope))
-                matrix = pd.concat(sector_ic, axis=1)
-                n_sector = matrix.count(axis=1)
-                ic = matrix.mean(axis=1).where(n_sector >= 2)
-                rows.append(dict(factor=name, family=family, norm=norm, scope="sector_equal", delay=delay,
-                                 **_stats(ic, n_sector.where(ic.notna()))))
-                daily[(name, norm, "sector_equal", delay)] = ic
-                if norm == "raw":
-                    matched = masked.notna() & outcome.notna()
-                    ic_ts, counts = _rank_corr(masked.T, outcome.T, MIN_DAYS)
-                    ts_rows.extend(dict(factor=name, symbol=s, sector=C.SECTOR[s], delay=delay,
-                                        days=int(matched[s].sum()), ic=ic_ts[s]) for s in counts.index)
+            sector_ic = []
+            for scope, cols in {"all": symbols, **sectors}.items():
+                least = XS["min_names"] if scope == "all" else MIN_SECTOR_NAMES
+                ic, count = _rank_corr(masked[cols], outcome[cols], least)
+                rows.append(dict(factor=name, family=family, norm=norm, scope=scope, horizon="d1",
+                                 **_stats(ic, count)))
+                daily[(name, norm, scope)] = ic
+                if scope != "all":
+                    sector_ic.append(ic.rename(scope))
+            matrix = pd.concat(sector_ic, axis=1)
+            n_sector = matrix.count(axis=1)
+            ic = matrix.mean(axis=1).where(n_sector >= 2)
+            rows.append(dict(factor=name, family=family, norm=norm, scope="sector_equal", horizon="d1",
+                             **_stats(ic, n_sector.where(ic.notna()))))
+            daily[(name, norm, "sector_equal")] = ic
+            if norm == "raw":
+                matched = masked.notna() & outcome.notna()
+                ic_ts, counts = _rank_corr(masked.T, outcome.T, MIN_DAYS)
+                ts_rows.extend(dict(factor=name, symbol=s, sector=C.SECTOR[s], horizon="d1",
+                                    days=int(matched[s].sum()), ic=ic_ts[s]) for s in counts.index)
 
     summary = pd.DataFrame(rows)
     primary = (summary["family"].eq("paper_indicator") & summary["norm"].eq("raw")
-               & summary["scope"].eq("all") & summary["delay"].eq(0))
+               & summary["scope"].eq("all") & summary["horizon"].eq("d1"))
     summary["q_primary"] = _bh(summary["p"].where(primary))
     summary["q_all"] = _bh(summary["p"])
     out.mkdir(parents=True, exist_ok=True)
@@ -349,13 +348,14 @@ def _ic_summary_5d(scores, outcomes, sectors):
 
 
 def run_five_day_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
-    """次日、5 日、第 2–5 日与延后一日 5 日收益的截面 IC。"""
+    """次日与五日收益的截面 IC。"""
     scores, eligible, contracts, bars = study_inputs(panel, jobs)
     sample = eligible.index
     returns = return_matrix(contracts, bars.set_index(["contract", "date"])["open"])
     outcomes = {
-        window: forward_returns(returns, horizon, delay).loc[sample]
-        for window, (horizon, delay) in HORIZONS.items()
+        window: (returns.shift(-1).loc[sample] if horizon == 1
+                 else forward_returns(returns, horizon).loc[sample])
+        for window, horizon in HORIZONS.items()
     }
     sectors = {}
     for name in contracts.columns:

@@ -8,7 +8,6 @@ import pytest
 import config as C
 import data as D
 from backtest import engine as P
-from strategies import rules as R
 
 
 def test_member_ic_label_uses_entry_contract_on_both_future_trading_dates():
@@ -43,30 +42,17 @@ def test_member_ic_pairs_only_dates_with_factor_and_label_and_keeps_zero_signals
     assert pd.isna(result.at["C_LONG_20", "ic"])
 
 
-def test_independent_timing_keeps_direction_until_its_own_exit():
-    from strategies.rules import timing_directions
-
-    z = pd.DataFrame({"A": [1.2, .2, np.nan, -1.2, -.3, .1],
-                      "B": [-1.2, -.2, .2, 1.6, .6, -.2]})
-    levels = z.copy()
-    levels.loc[4, "B"] = -.02
-    np.testing.assert_array_equal(
-        timing_directions(z, levels).to_numpy(),
-        [[1, -1], [1, -1], [0, 0], [-1, 1], [-1, 0], [0, 0]],
-    )
-
-
 def test_multi_day_forward_return_compounds_only_complete_future_windows():
-    from research.ic_study import forward_returns
+    from research.ic_study import HORIZONS, forward_returns
 
     dates = pd.bdate_range("2021-12-01", periods=10)
     returns = pd.DataFrame({"A": [0.9, .01, .02, .03, .04, .05, .06, .07, .08, .09]}, index=dates)
-    forward = forward_returns(returns, 5, 0)
+    assert HORIZONS == {"d1": 1, "d5": 5}
+    forward = forward_returns(returns, 5)
     assert forward.iloc[0, 0] == pytest.approx(np.prod([1.01, 1.02, 1.03, 1.04, 1.05]) - 1)
-    assert forward_returns(returns, 5, 1).iloc[0, 0] == pytest.approx(np.prod([1.02, 1.03, 1.04, 1.05, 1.06]) - 1)
     assert forward.iloc[-5:].isna().all().all()
     returns.iloc[4, 0] = np.nan
-    assert pd.isna(forward_returns(returns, 5, 0).iloc[0, 0])
+    assert pd.isna(forward_returns(returns, 5).iloc[0, 0])
 
 
 def test_fixed_rebalance_holds_integer_lots_between_schedule_dates():
@@ -94,8 +80,8 @@ def test_lot_targets_round_to_zero_and_leave_margin_reserve():
     np.testing.assert_array_equal(result, [5, -6, 0])
 
 
-def test_strategy_summary_calmar_uses_annual_return_and_absolute_drawdown():
-    from strategies.power_kds import _eval_book
+def test_flow_basis_summary_uses_equity_drawdown_and_backtest_sortino():
+    from strategies.flow_basis import _summary
 
     returns = pd.Series([0.10, -0.05, 0.02], index=pd.bdate_range("2020-01-01", periods=3))
     equity = P.CAPITAL_CNY * (1 + returns).cumprod()
@@ -112,13 +98,10 @@ def test_strategy_summary_calmar_uses_annual_return_and_absolute_drawdown():
         "open_contracts": 0,
         "stale_marks": 0,
     })
-    benchmark = pd.Series([0.0, 0.01, -0.01], index=returns.index)
 
-    result = _eval_book("TEST", "combo", 0, 1, daily, benchmark)
+    result = _summary("TEST", 1, daily)
 
     assert result["max_drawdown"] == pytest.approx(-0.05)
-    cagr = (equity.iloc[-1] / P.CAPITAL_CNY) ** (P.TD / len(returns)) - 1
-    assert result["calmar"] == pytest.approx(cagr / 0.05)
     assert result["sortino"] == pytest.approx(P.metrics(returns)["sortino"])
 
 
@@ -329,7 +312,7 @@ def test_partition_layout_seals_complete_oos_and_archive_roots():
     with pytest.raises(C.HoldoutViolation):
         C.assert_research_only(C.DATA_ROOT / "oos" / "future_dataset" / "A.parquet")
     with pytest.raises(C.HoldoutViolation):
-        C.assert_research_only(C.MINUTE_MONOLITH)
+        C.assert_research_only(C.ARCHIVE_DIR / "minute" / "A.parquet")
 
 
 def test_minute_merge_uses_trading_dates_and_preserves_legacy_columns(tmp_path):
@@ -445,15 +428,6 @@ def test_cost_matrix_uses_only_same_contract_past_fee_schedule():
     assert rates.iloc[1] == pytest.approx(101.0)
     assert rates.iloc[2] == pytest.approx(101.0)
     assert rates.iloc[3] == pytest.approx(102.0)
-
-
-def test_hold_cohorts_average_and_ramp():
-    dates = pd.bdate_range("2020-01-01", periods=4)
-    weights = pd.DataFrame({"a": [1.0, -1.0, 1.0, 1.0], "b": [-1.0, 1.0, -1.0, -1.0]}, index=dates)
-    held = R.hold_cohorts(weights, 2)
-    assert held.loc[dates[0], "a"] == pytest.approx(0.5)
-    assert held.loc[dates[1], "a"] == pytest.approx(0.0)
-    assert held.loc[dates[3], "a"] == pytest.approx(1.0)
 
 
 def test_to_single_sided_halves_only_before_2020():
@@ -624,24 +598,6 @@ def test_download_rejects_financial_futures():
         getMinutes.main(["-t", "20240101-20240102", "--symbols", "IF"])
 
 
-def test_short_shock_uses_past_quantiles_and_missing_stays_inactive():
-    from strategies.rules import short_shock
-
-    values = pd.Series([-30., -20., -10., 100., np.nan, -200.])
-    signal, strength = short_shock(values, window=3, minimum=2)
-    assert signal.iloc[:3].tolist() == [0., 0., 1.]
-    assert signal.iloc[3:].tolist() == [1., 0., -1.]
-    assert strength.iloc[3] > 0 and strength.iloc[5] < 0
-
-
-def test_short_shock_keeps_crossings_after_flat_history():
-    from strategies.rules import short_shock
-
-    signal, strength = short_shock(pd.Series([0., 0., 0., 1.]), window=3, minimum=3)
-    assert signal.iloc[-1] == 1
-    assert strength.iloc[-1] > 0
-
-
 def test_execution_retains_same_direction_lots_and_reconciles_equity():
     from backtest.engine import Quote, simulate
 
@@ -656,18 +612,6 @@ def test_execution_retains_same_direction_lots_and_reconciles_equity():
     assert daily.equity.iloc[-1] == pytest.approx(
         100_000 + daily.gross_pnl.sum() - daily.fees.sum() - daily.slippage.sum()
     )
-
-
-def test_active_weights_respects_min_slots():
-    from strategies.rules import active_weights
-
-    dates = pd.bdate_range("2021-01-04", periods=2)
-    dirs = pd.DataFrame(0.0, index=dates, columns=["A", "B", "C", "D"])
-    dirs.iloc[0, 0] = 1.0
-    dirs.iloc[1, :3] = [1.0, 1.0, -1.0]
-    w = active_weights(dirs, min_slots=2)
-    assert w.iloc[0].tolist() == [0.5, 0.0, 0.0, 0.0]
-    assert w.iloc[1].tolist() == pytest.approx([1 / 3, 1 / 3, -1 / 3, 0.0])
 
 
 def test_execution_parameters_partition_guards():
@@ -779,9 +723,8 @@ def test_candidate_factor_matrix_aligns_roll_yield_momentum_and_warehouse(tmp_pa
     assert factors.at[dates[22], ("WAREHOUSE_DRAW_20", "CU")] == pytest.approx(0.05)
 
 
-def test_simulate_margin_cap_and_power_kds_weights():
+def test_simulate_margin_cap():
     from backtest.engine import Quote, simulate
-    from strategies.power_kds import power_kds_weights
 
     dates = pd.bdate_range("2021-12-01", periods=3)
     contracts = pd.DataFrame({"A": "A2201"}, index=dates)
@@ -797,91 +740,14 @@ def test_simulate_margin_cap_and_power_kds_weights():
     with pytest.raises(ValueError):
         simulate(weights, contracts, market, dates[0], margin_cap=1.2)
 
-    elig = pd.DataFrame(True, index=dates, columns=["A", "B"])
-    z = pd.DataFrame({"A": [1.5, 1.2, 0.5], "B": [0.0, -1.5, -0.5]}, index=dates)
-    raw = pd.DataFrame({"A": [1.0, 1.0, 1.0], "B": [0.0, -1.0, -1.0]}, index=dates)
-    shock = pd.DataFrame({"A": [1.0, 0.0, 0.0], "B": [-1.0, 0.0, 0.0]}, index=dates)
-    wc, ws, w50 = power_kds_weights(z, raw, shock, elig, horizon=2)
-    np.testing.assert_allclose(w50.to_numpy(), (0.5 * wc + 0.5 * ws).to_numpy())
 
-
-def test_flow_control_ablation_preserves_fixed_leg_budgets():
-    from strategies.power_kds import flow_ablation_weights, power_kds_weights
+def test_flow_basis_cohorts_average_daily_cross_sections():
+    from strategies.flow_basis import hold_cohorts
 
     dates = pd.bdate_range("2021-12-01", periods=3)
-    eligible = pd.DataFrame(True, index=dates, columns=["A", "B"])
-    z_power = pd.DataFrame({"A": [1.5, 1.2, 0.5], "B": [-1.5, -1.2, -0.5]}, index=dates)
-    raw_power = pd.DataFrame({"A": [1.0, 1.0, 1.0], "B": [-1.0, -1.0, -1.0]}, index=dates)
-    shock = pd.DataFrame({"A": [1.0, 0.0, 0.0], "B": [0.0, 0.0, 0.0]}, index=dates)
-    z_flow = pd.DataFrame({"A": [0.0, 1.5, 0.0], "B": [0.0, -1.5, 0.0]}, index=dates)
-    raw_flow = pd.DataFrame({"A": [0.0, 1.0, 0.0], "B": [0.0, -1.0, 0.0]}, index=dates)
-
-    w_core, w_shock, _ = power_kds_weights(z_power, raw_power, shock, eligible, horizon=2)
-    flow_direction = R.timing_directions(z_flow, raw_flow)
-    w_flow = R.hold_cohorts(R.active_weights(flow_direction), 2)
-    ablations = flow_ablation_weights(
-        z_power, raw_power, shock, z_flow, raw_flow, eligible, horizon=2
-    )
-
-    np.testing.assert_allclose(
-        ablations["POWER_KDS_FLOW_REPLACES_SAT_2X"].to_numpy(),
-        (0.5 * w_core + 0.5 * w_flow).to_numpy(),
-    )
-    np.testing.assert_allclose(
-        ablations["POWER_KDS_FLOW_502525_2X"].to_numpy(),
-        (0.5 * w_core + 0.25 * w_shock + 0.25 * w_flow).to_numpy(),
-    )
-
-
-def test_position_blend_uses_common_complete_cross_section_and_balanced_tails():
-    from strategies.position_blend import BOOK_LABELS, FACTOR_NAMES, blend_scores
-
-    dates = pd.bdate_range("2021-12-01", periods=2)
-    symbols = [f"S{i:02d}" for i in range(10)]
-    columns = pd.MultiIndex.from_product([FACTOR_NAMES, symbols])
-    values = np.tile(np.arange(10, dtype=float), (len(FACTOR_NAMES), 1))
-    values[0] *= -1
-    factors = pd.DataFrame(
-        np.tile(values.ravel(), (len(dates), 1)),
-        index=dates,
-        columns=columns,
-    )
-    factors.loc[dates[0], ("FLOW_CONTROL", "S00")] = np.nan
-    eligible = pd.DataFrame(True, index=dates, columns=symbols)
-
-    scores, weights = blend_scores(factors, eligible)
-
-    assert tuple(scores) == tuple(BOOK_LABELS)
-    for book in BOOK_LABELS:
-        row = weights[book].loc[dates[0]]
-        assert row["S00"] == 0
-        assert row["S01"] == pytest.approx(-0.25)
-        assert row["S09"] == pytest.approx(0.25)
-        assert row.sum() == pytest.approx(0)
-        assert row.abs().sum() == pytest.approx(1)
-    assert pd.isna(scores["POSITION_FLOW_TREND"].loc[dates[0], "S00"])
-
-
-def test_power_kds_weights_can_normalize_by_actual_active_count():
-    from strategies.power_kds import power_kds_weights
-
-    dates = pd.bdate_range("2022-01-03", periods=1)
-    eligible = pd.DataFrame(True, index=dates, columns=["A", "B"])
-    z_power = pd.DataFrame({"A": [1.5], "B": [0.0]}, index=dates)
-    raw_power = pd.DataFrame({"A": [1.0], "B": [0.0]}, index=dates)
-    shock = pd.DataFrame({"A": [1.0], "B": [0.0]}, index=dates)
-
-    core_default, _, combined_default = power_kds_weights(
-        z_power, raw_power, shock, eligible, horizon=1,
-    )
-    core_actual, _, combined_actual = power_kds_weights(
-        z_power, raw_power, shock, eligible, horizon=1, min_slots=1,
-    )
-
-    assert core_default.loc[dates[0], "A"] == pytest.approx(0.1)
-    assert core_actual.loc[dates[0], "A"] == pytest.approx(1.0)
-    assert combined_default.loc[dates[0], "A"] == pytest.approx(0.1)
-    assert combined_actual.loc[dates[0], "A"] == pytest.approx(1.0)
+    weights = pd.DataFrame({"A": [0.5, -0.5, 0.0]}, index=dates)
+    held = hold_cohorts(weights, 2)
+    assert held["A"].tolist() == pytest.approx([0.25, 0.0, -0.25])
 
 
 def test_equity_drawdown_plot_compares_strategy_with_equal_weight_on_log_scale(tmp_path, monkeypatch):
@@ -938,11 +804,161 @@ def test_legacy_dominant_does_not_overwrite_successor_days():
 
 
 def test_calendar_year_return_uses_prior_year_end_equity():
-    from strategies.power_kds import calendar_year_returns
+    from strategies.flow_basis import _yearly_returns
 
     equity = pd.DataFrame({
-        "A": [100.0, 110.0, 121.0, 100.0],
+        "A": [P.CAPITAL_CNY, 1.1 * P.CAPITAL_CNY, 1.21 * P.CAPITAL_CNY, P.CAPITAL_CNY],
     }, index=pd.to_datetime(["2016-01-04", "2016-12-30", "2017-01-03", "2017-12-29"]))
-    out = calendar_year_returns(equity).set_index(["book", "year"])["return"]
+    out = _yearly_returns(equity).set_index(["book", "year"])["return"]
     assert out[("A", 2016)] == pytest.approx(0.10)
     assert out[("A", 2017)] == pytest.approx(100.0 / 110.0 - 1.0)
+
+
+def test_basis_momentum_needs_full_window_on_both_contracts():
+    from research.xs_robustness import basis_momentum
+
+    days = pd.bdate_range("2020-01-01", periods=5)
+    ret1 = pd.DataFrame({"A": [.01, .01, .01, .01, .01]}, index=days)
+    ret2 = pd.DataFrame({"A": [0.0, 0.0, np.nan, 0.0, 0.0]}, index=days)
+    out = basis_momentum(ret1, ret2, window=2)
+    assert np.isnan(out.iloc[0, 0]) and np.isnan(out.iloc[2, 0]) and np.isnan(out.iloc[3, 0])
+    assert out.iloc[1, 0] == pytest.approx(1.01 ** 2 - 1)
+    assert out.iloc[4, 0] == pytest.approx(1.01 ** 2 - 1)
+
+
+def test_leg_returns_split_top_and_bottom_against_pool_mean():
+    from research.xs_robustness import leg_returns
+
+    day = pd.DatetimeIndex(["2020-01-02"])
+    names = list("ABCDEFGHIJ")
+    score = pd.DataFrame([np.arange(10.0)], index=day, columns=names)
+    label = pd.DataFrame([np.arange(10.0) / 100], index=day, columns=names)
+    score.iloc[0, 0] = np.nan
+    legs = leg_returns(score, label, tail=0.2).iloc[0]
+    assert legs["top"] == pytest.approx((.09 + .08) / 2)
+    assert legs["bottom"] == pytest.approx((.01 + .02) / 2)
+    assert legs["pool"] == pytest.approx(np.arange(1, 10).mean() / 100)
+
+
+def test_active_flow_uses_volume_board_members_and_blanks_missing_open_interest():
+    from research.factors import active_flow
+
+    day = pd.Timestamp("2020-01-06")
+    ranks = pd.DataFrame({
+        "trading_date": [day] * 10,
+        "contract": ["A2001"] * 4 + ["A2005"] * 4 + ["A2009"] * 2,
+        "side": ["long", "short", "volume", "volume"] * 2 + ["long", "short"],
+        "member_name": ["a", "b", "a", "b", "c", "c", "c", "d", "e", "e"],
+        "volume_change": [4.0, -3.0, 0.0, 0.0, 1.0, -2.0, 0.0, 0.0, 100.0, -100.0],
+    })
+    contracts = pd.DataFrame({
+        "date": [day, day],
+        "contract": ["A2001", "A2005"],
+        "open_interest": [100.0, 50.0],
+    })
+    result = active_flow(ranks, contracts, pd.DatetimeIndex([day]))
+    assert result.at[day, "d_long"] == pytest.approx(5)
+    assert result.at[day, "d_short"] == pytest.approx(-5)
+    assert result.at[day, "disclosed_oi"] == pytest.approx(150)
+    assert result.at[day, "flow"] == pytest.approx(10 / 150)
+
+    off_board = ranks.copy()
+    off_board.loc[off_board.member_name.eq("a") & off_board.side.eq("volume"), "member_name"] = "z"
+    result = active_flow(off_board, contracts, pd.DatetimeIndex([day]))
+    assert result.at[day, "d_long"] == pytest.approx(1)
+    assert result.at[day, "d_short"] == pytest.approx(-5)
+
+    missing_change = ranks.copy()
+    missing_change.loc[missing_change.member_name.eq("c") & missing_change.side.eq("long"), "volume_change"] = np.nan
+    result = active_flow(missing_change, contracts, pd.DatetimeIndex([day]))
+    assert pd.isna(result.at[day, "d_long"])
+    assert pd.isna(result.at[day, "flow"])
+
+    missing_oi = contracts.copy()
+    missing_oi.loc[missing_oi.contract.eq("A2005"), "open_interest"] = np.nan
+    result = active_flow(ranks, missing_oi, pd.DatetimeIndex([day]))
+    assert pd.isna(result.at[day, "disclosed_oi"])
+    assert pd.isna(result.at[day, "flow"])
+
+
+def test_flow_basis_tails_leave_vetoed_slots_in_cash():
+    from strategies.flow_basis import tail_weights
+
+    days = pd.bdate_range("2020-01-01", periods=2)
+    names = [f"S{i}" for i in range(10)]
+    score = pd.DataFrame(np.tile(np.arange(10.0), (2, 1)), index=days, columns=names)
+    score.iloc[1, 3:] = np.nan
+    veto_long = pd.DataFrame(False, index=days, columns=names)
+    veto_short = veto_long.copy()
+    veto_long.loc[days[0], "S9"] = True
+    weights = tail_weights(score, veto_long, veto_short)
+    row = weights.loc[days[0]]
+    assert row["S9"] == 0 and row["S8"] == pytest.approx(0.25)
+    assert row["S0"] == pytest.approx(-0.25) and row["S1"] == pytest.approx(-0.25)
+    assert row.abs().sum() == pytest.approx(0.75)
+    assert weights.loc[days[1]].eq(0).all()
+
+
+def test_flow_basis_crowd_veto_uses_past_quantiles_and_blocks_missing():
+    from strategies import flow_basis as S
+
+    days = pd.bdate_range("2020-01-01", periods=S.MIN_OBSERVATIONS + 2)
+    crowd = pd.DataFrame({"A": np.r_[np.linspace(0, 1, S.MIN_OBSERVATIONS), 2.0, np.nan]}, index=days)
+    veto_long, veto_short = S.crowd_vetoes(crowd)
+    assert veto_long["A"].iloc[: S.MIN_OBSERVATIONS].all()
+    assert bool(veto_long["A"].iloc[-2]) and not bool(veto_short["A"].iloc[-2])
+    assert bool(veto_long["A"].iloc[-1]) and bool(veto_short["A"].iloc[-1])
+
+
+def test_flow_basis_score_ranks_only_candidates():
+    from strategies.flow_basis import FACTORS, composite_score
+
+    day = pd.DatetimeIndex(["2020-01-02"])
+    cols = list("ABCD")
+    rising = pd.DataFrame([[1.0, 2.0, 3.0, 100.0]], index=day, columns=cols)
+    falling = pd.DataFrame([[3.0, 2.0, 1.0, 100.0]], index=day, columns=cols)
+    candidates = pd.DataFrame([[True, True, True, False]], index=day, columns=cols)
+    values = {FACTORS[0]: rising, FACTORS[1]: falling, FACTORS[2]: rising}
+    score = composite_score(values, candidates).iloc[0]
+    assert score["A"] == pytest.approx((1 / 3 + 1 + 1 / 3) / 3)
+    assert score["B"] == pytest.approx(2 / 3)
+    assert np.isnan(score["D"])
+
+
+def test_flow_basis_cohorts_hold_ten_batches():
+    from strategies.flow_basis import HORIZON, hold_cohorts
+
+    days = pd.bdate_range("2020-01-01", periods=HORIZON + 1)
+    weights = pd.DataFrame({"A": [1.0] + [0.0] * HORIZON}, index=days)
+    held = hold_cohorts(weights)["A"]
+    assert held.iloc[: HORIZON].tolist() == pytest.approx([0.1] * HORIZON)
+    assert held.iloc[-1] == 0
+
+
+def test_flow_basis_cumulative_flow_needs_full_window_and_uses_current_open_interest():
+    from strategies.flow_basis import cumulative_flow
+
+    days = pd.bdate_range("2020-01-01", periods=5)
+    flow = pd.DataFrame({"A": [1.0, 2.0, 3.0, np.nan, 5.0]}, index=days)
+    oi = pd.DataFrame({"A": [10.0, 10.0, 20.0, 20.0, 40.0]}, index=days)
+    out = cumulative_flow(flow, oi, window=2)["A"]
+    assert np.isnan(out.iloc[0])
+    assert out.iloc[1] == pytest.approx(3.0 / 10.0)
+    assert out.iloc[2] == pytest.approx(5.0 / 20.0)
+    assert np.isnan(out.iloc[3]) and np.isnan(out.iloc[4])
+
+
+def test_flow_basis_score_weights_three_factors_equally_within_candidates():
+    from strategies.flow_basis import FACTORS, composite_score
+
+    day = pd.DatetimeIndex(["2020-01-02"])
+    cols = list("ABC")
+    values = {
+        FACTORS[0]: pd.DataFrame([[1.0, 2.0, 3.0]], index=day, columns=cols),
+        FACTORS[1]: pd.DataFrame([[1.0, 2.0, 3.0]], index=day, columns=cols),
+        FACTORS[2]: pd.DataFrame([[3.0, 2.0, 1.0]], index=day, columns=cols),
+    }
+    candidates = pd.DataFrame(True, index=day, columns=cols)
+    score = composite_score(values, candidates).iloc[0]
+    assert score["A"] == pytest.approx((1 / 3 + 1 / 3 + 1) / 3)
+    assert score["C"] == pytest.approx((1 + 1 + 1 / 3) / 3)

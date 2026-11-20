@@ -154,7 +154,7 @@ def run(panel: pd.DataFrame, out: Path) -> None:
     ).fillna(False)
     outcomes = {
         "d1": returns.shift(-1).loc[sample].where(eligible.loc[sample]),
-        "d5": forward_returns(returns, 5, 0).loc[sample].where(eligible.loc[sample]),
+        "d5": forward_returns(returns, 5).loc[sample].where(eligible.loc[sample]),
     }
 
     rows = []

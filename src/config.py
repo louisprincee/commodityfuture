@@ -12,7 +12,6 @@ CONFIG_DIR = Path(_os.environ.get("CF_CONFIG_DIR", PROJECT_ROOT / "config"))
 
 PARTITIONS = ("research", "oos")
 ARCHIVE_DIR = DATA_ROOT / "_archive"
-MINUTE_MONOLITH = ARCHIVE_DIR / "minute_monolith" / "future_all1mdata_20100101-20251231.txt"
 
 
 def partition_dir(partition: str, data_root: Path = DATA_ROOT) -> Path:

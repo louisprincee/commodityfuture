@@ -1,10 +1,9 @@
 """回测引擎：按合约、整数手与日结算价核算 1000 万元账户，权重层面的成本、换手与绩效统计，及策略命令行入口。
 
-    python -m backtest.engine power_kds
-    python -m backtest.engine power_kds --partition oos
+    python -m backtest.engine flow_basis
 
 持仓规则在 strategies，因子在 research。默认读取 2016–2021 研究期。
-样本外评价需显式指定 `--partition oos`，并用研究期历史做窗口预热；结果写入 runs/strategies/power_kds/oos/。
+样本外评价需显式指定 `--partition oos`，并用研究期历史做预热；结果写入对应策略目录。
 """
 from __future__ import annotations
 
@@ -731,13 +730,13 @@ def plot_equity_drawdown(
 # ---------------------------------------------------------------- 命令行入口
 
 STRATEGIES = {
-    "power_kds": "strategies.power_kds",
+    "flow_basis": "strategies.flow_basis",
 }
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m backtest.engine")
-    parser.add_argument("strategy", nargs="?", choices=list(STRATEGIES), default="power_kds")
+    parser.add_argument("strategy", nargs="?", choices=list(STRATEGIES), default="flow_basis")
     parser.add_argument("--partition", choices=("research", "oos"), default="research")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args(argv)

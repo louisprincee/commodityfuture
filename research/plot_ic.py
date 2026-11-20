@@ -36,7 +36,7 @@ def _factor_results(xs_dir: Path, member_dir: Path) -> tuple[pd.DataFrame, pd.Da
     five_day = pd.read_csv(five_day_path)
     member = pd.read_csv(member_path)
     next_day = paper.loc[
-        paper.scope.eq("all") & paper.norm.eq("raw") & paper.delay.eq(0)
+        paper.scope.eq("all") & paper.norm.eq("raw") & paper.horizon.eq("d1")
     ]
     five_day = five_day.loc[
         five_day.scope.eq("all") & five_day.norm.eq("raw") & five_day.window.eq("d5")

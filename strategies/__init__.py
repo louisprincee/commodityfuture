@@ -1,4 +1,4 @@
-"""待选策略：信号到持仓的规则与组合定义。回测在 backtest，因子在 research。"""
+"""当前策略定义。回测账户在 backtest，因子计算在 research。"""
 
 import sys
 from pathlib import Path

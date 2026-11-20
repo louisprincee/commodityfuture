@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import config as C
 import data as D
 
-COMMANDS = ("panel", "member-ic", "paper-ic", "five-day-ic", "candidate-ic", "plot-ic")
+COMMANDS = ("panel", "member-ic", "paper-ic", "five-day-ic", "candidate-ic", "xs-robustness", "plot-ic")
 
 
 def main(cmd: str, argv: list[str]) -> int:
@@ -28,6 +28,10 @@ def main(cmd: str, argv: list[str]) -> int:
     if cmd == "candidate-ic":
         from research import economic_ic
         economic_ic.run(D.load_panel(), C.study_dir("economic_ic"))
+        return 0
+    if cmd == "xs-robustness":
+        from research import xs_robustness
+        xs_robustness.run(C.study_dir("xs_robustness"))
         return 0
     from research import ic_study
     panel = D.load_panel()

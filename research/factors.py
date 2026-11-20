@@ -269,6 +269,64 @@ def kaiyuan(ranks: pd.DataFrame, contracts: pd.DataFrame, calendar: pd.DatetimeI
     return pd.DataFrame(out, index=calendar)
 
 
+def active_flow(ranks: pd.DataFrame, contracts: pd.DataFrame,
+                calendar: pd.DatetimeIndex) -> pd.DataFrame:
+    """同合约、同日成交榜会员的多空持仓增量，分母为这些合约的持仓量。
+
+    合约须同时有多头、空头和成交三榜。任一参与增量缺失，或任一入选合约持仓缺失，则当日流量缺失。
+    某一侧没有成交榜会员时，该侧增量记为 0，不把缺失当成无法计算。
+    """
+    calendar = pd.DatetimeIndex(pd.to_datetime(calendar)).normalize()
+    empty = pd.DataFrame(np.nan, index=calendar, columns=["d_long", "d_short", "disclosed_oi", "flow"])
+    if ranks.empty:
+        return empty
+    ranks = ranks.copy()
+    ranks["trading_date"] = pd.to_datetime(ranks["trading_date"]).dt.normalize()
+    keys = ["trading_date", "contract"]
+    covered = ranks.groupby(keys)["side"].nunique()
+    valid = covered[covered.eq(3)].index.to_frame(index=False)
+    if valid.empty:
+        return empty
+    holdings = ranks.loc[ranks.side.isin(["long", "short"])].merge(valid, on=keys)
+    participants = ranks.loc[ranks.side.eq("volume"), [*keys, "member_name"]].drop_duplicates()
+    active = holdings.merge(participants.assign(on_volume=True), on=[*keys, "member_name"], how="left")
+    active = active.loc[active["on_volume"].eq(True)]
+    if active.empty:
+        present = pd.DataFrame(0, index=calendar, columns=["long", "short"])
+        totals = pd.DataFrame(np.nan, index=calendar, columns=["long", "short"])
+    else:
+        present = active.groupby(["trading_date", "side"]).size().unstack("side")
+        present = present.reindex(index=calendar, columns=["long", "short"], fill_value=0)
+        changes = active.groupby(["trading_date", "side"])["volume_change"]
+        totals = changes.sum(min_count=1).where(changes.count().eq(changes.size())).unstack("side")
+        totals = totals.reindex(index=calendar, columns=["long", "short"])
+    covered_days = valid.groupby("trading_date").size().reindex(calendar, fill_value=0).gt(0)
+    d_long = totals["long"].mask(present["long"].eq(0) & covered_days, 0.0).where(covered_days)
+    d_short = totals["short"].mask(present["short"].eq(0) & covered_days, 0.0).where(covered_days)
+    if contracts.empty:
+        disclosed_oi = pd.Series(np.nan, index=calendar)
+        flow = (d_long - d_short).div(disclosed_oi)
+        return pd.DataFrame(
+            {"d_long": d_long, "d_short": d_short, "disclosed_oi": disclosed_oi, "flow": flow},
+            index=calendar,
+        )
+    contracts = contracts.copy()
+    contracts["date"] = pd.to_datetime(contracts["date"]).dt.normalize()
+    disclosed = valid.merge(
+        contracts[["date", "contract", "open_interest"]],
+        left_on=keys, right_on=["date", "contract"], how="left", validate="many_to_one",
+    )
+    grouped_oi = disclosed.groupby("trading_date")["open_interest"]
+    disclosed_oi = grouped_oi.sum(min_count=1).where(
+        grouped_oi.size().eq(grouped_oi.count())
+    ).reindex(calendar)
+    flow = (d_long - d_short).div(disclosed_oi.where(disclosed_oi.gt(0)))
+    return pd.DataFrame(
+        {"d_long": d_long, "d_short": d_short, "disclosed_oi": disclosed_oi, "flow": flow},
+        index=calendar,
+    )
+
+
 def kaiyuan_active(ranks: pd.DataFrame, calendar: pd.DatetimeIndex) -> pd.DataFrame:
     """仅在同合约同日成交榜内的会员参与增量汇总，并保留同覆盖原版。"""
     matrix = pd.DataFrame(index=calendar)

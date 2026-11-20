@@ -44,9 +44,7 @@ DOUBLE_SIDED_FIELDS = ("volume", "total_turnover", "open_interest")
 # 时点流动性池。研究、策略与回测共用；门槛沿用既有研究口径，不按收益调整。
 UNIVERSE = {
     "turnover_window_days": 242,
-    "turnover_min_periods": 60,
     "min_median_daily_turnover_cny": 500_000_000,
-    "min_history_days": 130,
     "require_dominant_volume_positive": True,
     "excluded_symbols": ["EC"],
 }

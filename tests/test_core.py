@@ -372,6 +372,22 @@ def test_eligibility_ignores_future_turnover():
     assert before[past].iloc[-1]
 
 
+def test_eligibility_requires_full_242_day_liquidity_window():
+    dates = pd.bdate_range("2020-01-01", periods=242)
+    panel = pd.DataFrame({
+        "date": dates,
+        "symbol": ["A"] * len(dates),
+        "turnover_total": [500_000_000.0] * len(dates),
+        "c1_volume": [1.0] * len(dates),
+        "ret1": [0.01] * len(dates),
+    })
+
+    eligible = D.eligibility(panel)
+
+    assert eligible.iloc[:-1].eq(False).all()
+    assert eligible.iloc[-1]
+
+
 def test_backtest_timing_and_roll_cost():
     dates = pd.bdate_range("2020-01-01", periods=5)
     weights = pd.DataFrame({"x": [1.0, 1.0, 1.0, 1.0, 1.0]}, index=dates)

@@ -344,16 +344,15 @@ def build_daily_panel(partition: str = "research", symbols: list[str] | None = N
 
 
 def eligibility(panel: pd.DataFrame) -> pd.Series:
-    """时点品种池：过去 242 日成交额中位数、上市天数、当日主力有成交。收盘时当日成交额已知。"""
+    """时点品种池：过去 242 日成交额中位数、当日主力有成交。收盘时当日成交额已知。"""
     universe = C.UNIVERSE
     grouped = panel.groupby("symbol", sort=False)
     median = grouped["turnover_total"].transform(
         lambda s: s.rolling(
-            universe["turnover_window_days"], min_periods=universe["turnover_min_periods"]
+            universe["turnover_window_days"], min_periods=universe["turnover_window_days"]
         ).median()
     )
-    age = grouped.cumcount() + 1
-    ok = (median >= universe["min_median_daily_turnover_cny"]) & (age >= universe["min_history_days"])
+    ok = median >= universe["min_median_daily_turnover_cny"]
     if universe["require_dominant_volume_positive"]:
         ok &= panel["c1_volume"] > 0
     ok &= panel["ret1"].notna()

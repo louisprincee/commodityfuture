@@ -42,4 +42,4 @@ python -m pytest tests -p no:cacheprovider
 
 因子定义、公式、检验和策略经济故事统一记录在 [docs/research.md](docs/research.md)。因子 IC 输出在 `runs/research/member_ic/`（会员因子时序）、`runs/research/xs_position/`（会员因子截面与 5 日）、`runs/research/economic_ic/`（经济先验因子）与 `runs/research/xs_robustness/`（截面稳健性）。当前策略回测统一输出在 `runs/strategies/sticky_core/{research,oos,combined}/`。
 
-研究期回测与因子评价为 2016–2021。2010–2015 只用于指标预热。2022–2025 是封存样本外分区，不用于因子或参数选择；只有在明确请求并预先声明评估方案后，才可评价已冻结的规则。本地 `data/` 与 `runs/` 未纳入版本控制。
+研究期回测与因子评价为 2016–2021。2010–2015 只用于指标预热。2022–2025 是封存样本外分区，不用于因子或参数选择；只有在明确请求并预先声明评估方案后，才可评价已冻结的规则。流动性资格使用过去 242 个交易日成交额中位数，不再叠加上市天数或 60 日有效观测门槛。本地 `data/` 与 `runs/` 未纳入版本控制。

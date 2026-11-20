@@ -1,97 +1,105 @@
-# Chinese Commodity Futures Factor Research
+# 商品期货因子研究与策略回测
 
-## 1. Scope and Objective
+## 1. 研究范围
 
-The research covers Chinese commodity futures only. Financial futures are configuration exclusions rather than trading books.
+本研究只覆盖中国商品期货，不包含股指、国债等金融期货。金融期货在配置和下载校验中被明确排除，不属于交易组合。
 
-The objective is to test whether a small set of pre-defined price and member-position factors has stable predictive content and can support one transparent cross-sectional strategy.
+现行策略为 `STICKY_CORE_2X`。策略只依赖三个截面因子：
 
-The active strategy is `STICKY_CORE_2X`.
+1. 基差动量 `BASIS_MOM_242`
+2. 负向偏度 `NEG_SKEW_242`
+3. 粘性席位净多头占比 `STICKY_NET_SHARE`
 
-## 2. Samples and Timing
+策略不使用波动率倒数加权、板块限仓或额外持仓流因子。
 
-| Partition | Date range | Use |
+---
+
+## 2. 样本、流动性与时点
+
+| 分区 | 日期范围 | 用途 |
 |---|---|---|
-| Warm-up | 2010-01-04 to 2015-12-31 | Rolling-window warm-up only |
-| Research | 2016-01-04 to 2021-12-31 | Parameter-free factor and strategy evaluation |
-| Out of sample | 2022-01-04 to 2025-12-31 | Sealed partition evaluation after rule freeze |
+| 预热期 | 2010-01-04 至 2015-12-31 | 滚动窗口预热，不用于选择因子和参数 |
+| 研究期 | 2016-01-04 至 2021-12-31 | 研究期统计与回测 |
+| 封存样本外 | 2022-01-04 至 2025-12-31 | 规则冻结后的样本外评价 |
 
-The liquidity universe is formed at the close of day \(t\). It is not revised with future turnover:
+流动性资格在交易日收盘后按时点计算：
 
-- The median of daily turnover over the most recent 242 trading days must be at least RMB 500 million.
-- A 242-day window is required. There is no separate listing-age or 60-observation threshold.
-- The dominant contract must have positive volume on day \(t\).
-- The dominant-contract return must be valid.
-- EC is excluded.
+- 过去 242 个交易日的成交额中位数不低于 5 亿元；
+- 窗口不足 242 个有效交易日时，该品种不入池；
+- 当日主力合约成交量为正；
+- 当日主力合约收益有效；
+- 排除集运指数 `EC`。
 
-A factor on day \(t\) uses only prices and member rankings known by the close of \(t\). Weights formed at the close of \(t\) first trade at the next session's open.
+因子只使用交易日 \(t\) 收盘前可见的价格和会员排名。收盘形成权重后，在下一交易日开盘成交。
 
-Forward labels use the next main contract, which avoids mixing one contract's open-to-open return across a roll.
+收益标签使用下一个主力合约，避免把换约后的多个合约简单拼接成连续名义收益。
 
-## 3. Factor Definitions
+---
 
-### 3.1 Basis-momentum factor
+## 3. 正式因子公式
 
-For contract-specific close-to-close returns \(r^{(1)}\) and \(r^{(2)}\) on the dominant and second-dominant contracts:
+商品以 \(i\) 表示，交易日以 \(t\) 表示。主力合约和次主力合约日收益分别记为 \(r^{(1)}_{i,\tau}\) 和 \(r^{(2)}_{i,\tau}\)。
+
+### 3.1 基差动量
 
 \[
 \operatorname{BASIS\_MOM}_{242,i,t}
 =
 \left(\prod_{\tau=t-241}^{t}(1+r^{(1)}_{i,\tau})-1\right)
--\left(\prod_{\tau=t-241}^{t}(1+r^{(2)}_{i,\tau})-1\right).
+-\left(\prod_{\tau=t-241}^{t}(1+r^{(2)}_{i,\tau})-1\right)
 \]
 
-The factor is missing unless both 242-day series are complete.
+任一合约序列不足 242 个有效日时，当日因子缺失。
 
-Economic interpretation: changes in the slope of the futures curve. A positive score means the dominant contract has outperformed the second-dominant contract over the trailing year.
+经济含义是期限结构变化形成的截面溢价。主力相对次主力过去一年表现更强时，得分为正。
 
-### 3.2 Negative-skew factor
+### 3.2 负向偏度
 
 \[
 \operatorname{NEG\_SKEW}_{242,i,t}
 =-\operatorname{Skew}_{242}(r^{(1)}_{i,t})
 \]
 
-The skew window is 242 trading days with at least 200 valid observations.
+窗口为 242 个交易日，至少保留 200 个有效日。原始偏度取反后，负偏度较低、正偏度较高的商品得到较高风险补偿得分。
 
-Economic interpretation: risk compensation for lottery-like positive skew and tail-risk aversion. The sign is negative for raw skew and positive for negative-skew compensation.
+经济含义是尾部风险定价错位。负偏度更高时，商品更有可能承受极端下跌风险，因子倾向于买入这类风险补偿较高的品种。
 
-### 3.3 Sticky-member net-share factor
+### 3.3 粘性席位净多头占比
 
-For member \(j\), let \(L_{j,t}\), \(S_{j,t}\), and \(V_{j,t}\) be long positions, short positions, and volume.
+交易所披露的席位 \(j\) 的多头持仓、空头持仓和成交量分别记为 \(L_{j,t}\)、\(S_{j,t}\) 和 \(V_{j,t}\)。
 
-The market turnover ratio is:
+市场换手率为：
 
 \[
 \operatorname{MarketTurnover}_{i,t}
 =
-\frac{V^{market}_{i,t}}{OI^{market}_{i,t}}.
+\frac{V^{market}_{i,t}}{OI^{market}_{i,t}}
 \]
 
-A member is classified as high-turnover when:
+席位换手率达到或超过市场换手率时，视为高换手席位：
 
 \[
 \frac{V_{j,t}}{L_{j,t}+S_{j,t}}
 \ge
-\operatorname{MarketTurnover}_{i,t}.
+\operatorname{MarketTurnover}_{i,t}
 \]
 
-The sticky set contains disclosed members outside that high-turnover set, including one-sided long or short positions that are valid and persistent:
+剔除高换手席位后：
 
 \[
 \operatorname{STICKY\_NET\_SHARE}_{i,t}
 =
 \frac{\sum_{j\in \operatorname{Sticky}_{i,t}}(L_{j,t}-S_{j,t})}
-{\sum_{j\in \operatorname{Sticky}_{i,t}}(L_{j,t}+S_{j,t})}.
+{\sum_{j\in \operatorname{Sticky}_{i,t}}(L_{j,t}+S_{j,t})}
 \]
 
-Missing members and zero gross positions are excluded from both numerator and denominator.
+持仓总量为零或席位不在榜的数据不计入分子和分母。
 
-Economic interpretation: persistent industrial hedgers and long-horizon institutions may show lower turnover than short-horizon active traders. The factor captures the visible net-position imbalance of the lower-turnover part of the top-20 member book.
+经济含义是产业套保或长线机构持有的持仓结构变化。低换手席位相对稳定，因此净多头占比可以代表可见筹码中的持仓方向失衡。
 
-### 3.4 Composite score and weights
+### 3.4 截面合成
 
-Within the liquid candidate pool on day \(t\), rank the three factors cross-sectionally using percentile ranks:
+在流动性池内且三个因子均有效的品种中，对每个因子分别做截面百分位秩：
 
 \[
 \operatorname{Score}_{i,t}
@@ -102,118 +110,139 @@ Within the liquid candidate pool on day \(t\), rank the three factors cross-sect
 \operatorname{PctRank}(\operatorname{NEG\_SKEW}_{i,t})
 +
 \operatorname{PctRank}(\operatorname{STICKY\_NET\_SHARE}_{i,t})
-}{3}.
+}{3}
 \]
 
-The equal-rank average avoids estimating in-sample factor weights.
+有效品种少于 8 个时不持仓。
 
-If at least eight names are valid, select the highest and lowest \(\lceil20\%N_t\rceil\) names. Long names receive a combined \(+0.50\) target weight and short names receive a combined \(-0.50\) target weight.
+有效品种数不少于 8 个时，取最高和最低各 \(\lceil20\%N_t\rceil\) 个品种。多头合计名义权重为 \(+0.50\)，空头合计名义权重为 \(-0.50\)，两侧内部等权。
 
-Each fresh batch remains held for ten sessions:
+每日新鲜权重平均持有 10 个交易日：
 
 \[
-w_{i,t}^{held}
+w^{held}_{i,t}
 =
-\frac{1}{10}\sum_{\ell=0}^{9}w_{i,t-\ell}^{fresh}.
+\frac{1}{10}\sum_{\ell=0}^{9}w^{fresh}_{i,t-\ell}
 \]
 
-The close-formed weights trade at the next session's open.
+收盘形成权重后，在下一交易日开盘成交。
 
-## 4. Factor Evidence
+---
 
-### 4.1 Predictive test protocol
+## 4. 因子检验
 
-The member-factor study tested 80 original and sensitivity indicators. It used:
+### 4.1 检验口径
 
-- Next-open label and five-session open-to-open label.
-- The same commodity universe, factor directions, and minimum pair requirement.
-- Time-series correlation for each symbol.
-- Cross-sectional rank correlation for the full market.
-- Benjamini-Hochberg correction within families defined before seeing results.
+会员持仓指标研究共输出约 80 个原始指标、离散信号和敏感性规格。
 
-The main economic-factor family contains the roll yield, 12-1 momentum, and warehouse drawdown.
+检验使用：
 
-### 4.2 Economic-factor results
+- 次日开盘收益标签；
+- 五日和多日开盘收益标签；
+- 相同的流动性池、因子方向和最少有效配对日；
+-逐品种时序相关；
+-全市场逐日截面相关；
+-在结果出现前固定的 Benjamini-Hochberg 校正族。
 
-| Factor | Horizon | Mean IC | HAC t | Primary q | Full q |
+经济先验因子族包括期限结构、12-1 月动量和仓单下降；会员持仓因子族另行校正，不能混在同一次校正中。
+
+### 4.2 经济先验因子结果
+
+| 因子 | 预测期 | 平均 IC | HAC t | 主族 \(q\) | 完整族 \(q\) |
 |---|---|---:|---:|---:|---:|
-| Roll yield | 1 day | +0.02200 | +3.57 | 0.00107 | 0.00214 |
-| 12-1 momentum | 1 day | +0.02464 | +3.27 | 0.00163 | 0.00326 |
-| Warehouse drawdown | 1 day | +0.00483 | +1.15 | 0.24855 | 0.29826 |
+| 期限结构 | 次日 | +0.02200 | +3.57 | 0.00107 | 0.00214 |
+| 12-1 月动量 | 次日 | +0.02464 | +3.27 | 0.00163 | 0.00326 |
+| 仓单下降 | 次日 | +0.00483 | +1.15 | 0.24855 | 0.29826 |
 
-Roll yield and 12-1 momentum pass their predeclared economic-factor families. Warehouse drawdown does not.
+期限结构和 12-1 月动量通过预先定义的经济因子族校正；仓单下降未通过。
 
-### 4.3 Cross-sectional robustness
+### 4.3 截面稳健性
 
-The five- and ten-session robustness tests use 5, 10, and 20-session labels. The following factors pass the 10-session robustness record.
+截面稳健性检验分别检查 5 日、10 日和 20 日收益标签，并通过以下标准筛选：
 
-| Factor | 10-day IC | HAC t | Long-leg excess | Short-leg excess | Positive years |
+- 主族 BH 校正后至少一个预测期显著；
+- 上涨和下跌状态下 IC 均为正；
+- 高波动和低波动状态下 IC 均为正；
+- 2016-2021 年至少 5 年 IC 为正；
+- 前 20% 减池均值为正，池均值减后 20% 为正。
+
+以 10 日作为判定口径：
+
+| 因子 | 10 日 IC | HAC t | 多头超额 bp | 空头超额 bp | 正 IC 年数 |
 |---|---:|---:|---:|---:|---:|
-| Roll yield | +0.0457 | +2.58 | +18.9 bp | +28.8 bp | 5/6 |
-| 12-1 momentum | +0.0508 | +2.25 | +29.0 bp | +27.3 bp | 6/6 |
-| Basis momentum | +0.0421 | +2.61 | +29.6 bp | +26.3 bp | 6/6 |
-| Negative skew | +0.0362 | +2.31 | +21.4 bp | +29.0 bp | 6/6 |
-| K_NET_SHARE | +0.0320 | +2.06 | +16.0 bp | +20.0 bp | 6/6 |
+| 期限结构 | +0.0457 | +2.58 | +18.9 | +28.8 | 5 |
+| 12-1 月动量 | +0.0508 | +2.25 | +29.0 | +27.3 | 6 |
+| 基差动量 | +0.0421 | +2.61 | +29.6 | +26.3 | 6 |
+| 负向偏度 | +0.0362 | +2.31 | +21.4 | +29.0 | 6 |
+| K_NET_SHARE | +0.0320 | +2.06 | +16.0 | +20.0 | 6 |
 
-Flow control, -K_DS, and K_DB are not robust two-leg signals in the same 10-session family. Flow control is strongest over five sessions and mostly contributes to the long leg. -K_DS has stronger next-day and time-series evidence, but not the two-leg robustness record used by this strategy. K_DB is near zero in cross-sectional robustness testing.
+会员持仓流和空头持仓增量在短期或单腿上有信息，但没有稳定通过十日两端稳健性标准。
 
-### 4.4 Seat-purity evidence
+### 4.4 席位提纯
 
-Splitting the top-20 member book by the CROWD1 turnover threshold yields:
+按 CROWD1 换手门槛将前 20 名席位拆成互斥的粘性席位和高换手席位：
 
-| Seat set | 10-day IC | Interpretation |
+| 席位集合 | 10 日 IC | 表现 |
 |---|---:|---|
-| Sticky members | +0.0416 | Positive, stable, and passes the stated robustness checks |
-| High-turnover active members | -0.0208 | Negative and unstable |
+| 粘性席位 | +0.0416 | 正向、稳定，并通过既定稳健性检查 |
+| 高换手席位 | -0.0208 | 负向且不稳定 |
 
-The sticky member set is used by the active strategy. The high-turnover set is not used as a separate factor.
+正式策略只保留粘性席位净多头占比，不把高换手席位因子作为独立因子加入组合。
 
-## 5. Active Strategy
+---
 
-The current strategy is `STICKY_CORE_2X`.
+## 5. 当前策略：STICKY_CORE_2X
 
-It combines:
+### 5.1 策略构造
 
-1. `BASIS_MOM_242`
-2. `NEG_SKEW_242`
-3. `STICKY_NET_SHARE`
+当前策略同时使用：
 
-The three factors are ranked independently inside the daily liquidity pool and averaged equally. No volatility inverse weighting, sector control, or extra member-flow factor is part of the active code.
+- `BASIS_MOM_242`
+- `NEG_SKEW_242`
+- `STICKY_NET_SHARE`
 
-Execution assumptions:
+三个因子先分别计算截面百分位秩，再等权平均。成分因子不进行在研究期内重新估计权重。
 
-- Initial equity: RMB 10 million
-- Target-weight multiplier: 2.0X input to orders
-- Maximum name weight: 20%
-- Account margin cap: 50%
-- Flat margin: 20%
-- Integer lots
-- Historical commissions
-- One-tick and two-tick slippage cases
-- One tick per side is the report case
-- Roll closes the old contract and opens the new contract
-- Long and short gross weights are neutralized
+选样规则：
 
-## 6. Research-Period Backtest
+- 候选品种必须同时满足流动性资格和三个因子有效；
+- 至少保留 8 个有效品种；
+- 前 20% 做多，合计名义权重 \(+0.50\)；
+- 后 20% 做空，合计名义权重 \(-0.50\)；
+- 两侧内部等权；
+- 每日生成一批权重，重叠持有 10 个交易日；
+- 收盘形成权重，下一交易日开盘成交。
 
-Period: 2016-01-04 to 2021-12-31.
+### 5.2 回测口径
 
-The following table uses one tick per side.
+- 初始权益：1000 万元；
+- 下单前权重乘数：2.0X；
+- 单品种名义上限：20%；
+- 保证金上限：50%；
+- 统一保证金率：20%；
+- 保持整数手；
+- 历史手续费；
+- 每边滑点分别按 1 tick 和 2 tick 保存；
+- 报告只使用每边 1 tick；
+- 换约时平旧合约并开新合约；
+- 组合强制多空配平。
 
-| Book | End equity, RMB 10k | Net annualized | Sharpe | Maximum drawdown | Daily turnover | Mean gross exposure | Margin peak |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Equal-weight benchmark | 1893.06 | 10.98% | 1.21 | -13.96% | 4.26% | 89.76% | 19.08% |
-| STICKY_CORE_2X | 1991.26 | 12.06% | 1.06 | -18.72% | 18.67% | 193.16% | 40.09% |
+---
 
-The two-tick case preserves positive results:
+## 6. 研究期回测
 
-| Book | Net annualized | Sharpe |
-|---|---:|---:|
-| STICKY_CORE_2X | 10.40% | 0.92 |
+研究期为 2016-01-04 至 2021-12-31。下表为每边 1 tick。
 
-Annual returns:
+| 组合 | 期末权益（万元） | 净年化 | 夏普 | 最大回撤 | 日换手 | 平均实际总敞口 | 净敞口 | 保证金峰值 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 动态等权基准 | 1893.06 | +10.98% | 1.21 | -13.96% | 4.26% | 89.76% | +89.76% | 19.08% |
+| STICKY_CORE_2X | 1991.26 | +12.06% | 1.06 | -18.72% | 18.67% | 193.16% | -0.74% | 40.09% |
 
-| Year | Benchmark | STICKY_CORE_2X |
+每边 2 tick 时，`STICKY_CORE_2X` 的净年化为 10.40%，夏普为 0.92。
+
+分年净收益：
+
+| 年份 | 动态等权基准 | STICKY_CORE_2X |
 |---|---:|---:|
 | 2016 | +36.73% | +20.03% |
 | 2017 | +4.90% | +14.55% |
@@ -222,54 +251,58 @@ Annual returns:
 | 2020 | +7.66% | +28.57% |
 | 2021 | +18.96% | +0.55% |
 
-## 7. Out-of-Sample Backtest
+结果文件：
 
-Period: 2022-01-04 to 2025-12-31.
+- [研究期摘要](../runs/strategies/sticky_core/research/summary.csv)
+- [研究期逐年收益](../runs/strategies/sticky_core/research/yearly_returns.csv)
+- [研究期选样摘要](../runs/strategies/sticky_core/research/selection_summary.csv)
+- [研究期绩效图](../runs/strategies/sticky_core/research/performance.png)
 
-The OOS panel retains 2010-2021 history for trailing-window warm-up. It does not rewrite the factor signs, windows, rank composition, holding period, or 2X input multiplier.
+---
 
-The following table uses one tick per side.
+## 7. 封存样本外回测
 
-| Book | End equity, RMB 10k | Net annualized | Sharpe | Maximum drawdown | Daily turnover | Mean gross exposure | Margin peak |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Equal-weight benchmark | 1009.07 | 0.50% | 0.07 | -15.07% | 4.62% | 75.72% | 16.36% |
-| STICKY_CORE_2X | 1390.19 | 8.60% | 0.99 | -12.72% | 20.25% | 183.21% | 38.73% |
+样本外日期为 2022-01-04 至 2025-12-31。回测保留 2010-2021 日线和会员排名作为窗口预热，不修改因子符号、窗口、合成方式、持有期或杠杆输入。
 
-The two-tick case:
+下表为每边 1 tick。
 
-| Book | Net annualized | Sharpe |
-|---|---:|---:|
-| STICKY_CORE_2X | 7.29% | 0.84 |
+| 组合 | 期末权益（万元） | 净年化 | 夏普 | 最大回撤 | 日换手 | 平均实际总敞口 | 净敞口 | 保证金峰值 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 动态等权基准 | 1009.07 | +0.50% | 0.07 | -15.07% | 4.62% | 75.72% | +75.72% | 16.36% |
+| STICKY_CORE_2X | 1390.19 | +8.60% | 0.99 | -12.72% | 20.25% | 183.21% | -1.83% | 38.73% |
 
-Annual returns:
+每边 2 tick 时，`STICKY_CORE_2X` 的净年化为 7.29%，夏普为 0.84。
 
-| Year | Benchmark | STICKY_CORE_2X |
+分年净收益：
+
+| 年份 | 动态等权基准 | STICKY_CORE_2X |
 |---|---:|---:|
 | 2022 | +7.68% | +14.64% |
 | 2023 | +4.24% | -6.95% |
 | 2024 | -5.58% | +10.55% |
 | 2025 | -4.79% | +17.89% |
 
-## 8. Combined Result
+结果文件：
 
-The combined curve applies OOS results by scaling the 2022-01-04 OOS NAV to the 2021-12-31 research-period NAV, preserving both partitions as separate backtest specifications.
+- [样本外摘要](../runs/strategies/sticky_core/oos/summary.csv)
+- [样本外逐年收益](../runs/strategies/sticky_core/oos/yearly_returns.csv)
+- [样本外选样摘要](../runs/strategies/sticky_core/oos/selection_summary.csv)
+- [样本外绩效图](../runs/strategies/sticky_core/oos/performance.png)
 
-| Book | End equity, RMB 10k | Net annualized | Sharpe | Maximum drawdown |
+---
+
+## 8. 完整区间
+
+完整区间把研究期 2021-12-31 的净值承接样本外的日收益。承接后：
+
+| 组合 | 期末权益（万元） | 净年化 | 夏普 | 最大回撤 |
 |---|---:|---:|---:|---:|
-| Equal-weight benchmark | 1910.23 | 6.80% | 0.81 | -15.07% |
-| STICKY_CORE_2X | 2768.22 | 10.68% | 1.03 | -18.72% |
+| 动态等权基准 | 1910.23 | +6.80% | 0.81 | -15.07% |
+| STICKY_CORE_2X | 2768.22 | +10.68% | 1.03 | -18.72% |
 
-## 9. Output Files
+完整区间结果文件：
 
-- Research summary: [summary.csv](../runs/strategies/sticky_core/research/summary.csv)
-- Research yearly returns: [yearly_returns.csv](../runs/strategies/sticky_core/research/yearly_returns.csv)
-- Research selection summary: [selection_summary.csv](../runs/strategies/sticky_core/research/selection_summary.csv)
-- Research performance chart: [performance.png](../runs/strategies/sticky_core/research/performance.png)
-- OOS summary: [summary.csv](../runs/strategies/sticky_core/oos/summary.csv)
-- OOS yearly returns: [yearly_returns.csv](../runs/strategies/sticky_core/oos/yearly_returns.csv)
-- OOS selection summary: [selection_summary.csv](../runs/strategies/sticky_core/oos/selection_summary.csv)
-- OOS performance chart: [performance.png](../runs/strategies/sticky_core/oos/performance.png)
-- Combined summary: [summary.csv](../runs/strategies/sticky_core/combined/summary.csv)
-- Combined yearly returns: [yearly_returns.csv](../runs/strategies/sticky_core/combined/yearly_returns.csv)
-- Combined equity curve: [equity_curves.csv](../runs/strategies/sticky_core/combined/equity_curves.csv)
-- Combined performance chart: [performance.png](../runs/strategies/sticky_core/combined/performance.png)
+- [完整区间摘要](../runs/strategies/sticky_core/combined/summary.csv)
+- [完整区间逐年收益](../runs/strategies/sticky_core/combined/yearly_returns.csv)
+- [完整区间净值曲线](../runs/strategies/sticky_core/combined/equity_curves.csv)
+- [完整区间绩效图](../runs/strategies/sticky_core/combined/performance.png)

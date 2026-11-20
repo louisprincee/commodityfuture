@@ -1,420 +1,39 @@
-# 商品期货会员持仓因子研究
+# Chinese Commodity Futures Factor Research
 
----
+## 1. Scope and Objective
 
-## 1. 研究来源与问题
+The research covers Chinese commodity futures only. Financial futures are configuration exclusions rather than trading books.
 
-### 1.1 兴业证券：会员拥挤度与一致性
+The objective is to test whether a small set of pre-defined price and member-position factors has stable predictive content and can support one transparent cross-sectional strategy.
 
-[《基于期货会员持仓的拥挤度与一致性 CTA 择时策略研究》](<20260805-兴业证券-基于期货会员持仓的拥挤度与一致性CTA择时策略研究.pdf>)以交易所每日披露的前 20 名会员多头、空头和成交量榜单为基础，研究两类信息：
+The active strategy is `STICKY_CORE_2X`.
 
-- **拥挤度**：识别成交活跃或集中调仓的会员，观察其净持仓结构。原研究以极端拥挤程度与近期价格方向构造反转择时信号。
-- **一致性**：以窗口内持续上榜的会员为样本，按末日净头寸划分净多、净空阵营，衡量阵营内持仓路径的一致程度及阵营总净头寸变化速度。两侧信息合成为顺势指标 \(\operatorname{POWER}\)。
+## 2. Samples and Timing
 
-### 1.2 开源证券：蜘蛛网与会员净多结构
+| Partition | Date range | Use |
+|---|---|---|
+| Warm-up | 2010-01-04 to 2015-12-31 | Rolling-window warm-up only |
+| Research | 2016-01-04 to 2021-12-31 | Parameter-free factor and strategy evaluation |
+| Out of sample | 2022-01-04 to 2025-12-31 | Sealed partition evaluation after rule freeze |
 
-[《蜘蛛网策略复盘与期货会员行为分析》](<20250307-开源证券-开源量化评论（104）：蜘蛛网策略复盘与期货会员行为分析.pdf>)关注披露会员的多空持仓增量方向、蜘蛛网事件及净多头占比变化。研究实现包括 \(K_{DB}\)、\(K_{DS}\) 以及 \(K_{\mathrm{NET\_SHARE}}\) 等。
+The liquidity universe is formed at the close of day \(t\). It is not revised with future turnover:
 
----
+- The median of daily turnover over the most recent 242 trading days must be at least RMB 500 million.
+- A 242-day window is required. There is no separate listing-age or 60-observation threshold.
+- The dominant contract must have positive volume on day \(t\).
+- The dominant-contract return must be valid.
+- EC is excluded.
 
-## 2. 数据、样本与检验设计
+A factor on day \(t\) uses only prices and member rankings known by the close of \(t\). Weights formed at the close of \(t\) first trade at the next session's open.
 
-### 2.1 样本和交易品种
+Forward labels use the next main contract, which avoids mixing one contract's open-to-open return across a roll.
 
-- 研究数据覆盖 2010-01-04 至 2021-12-31；2010–2015 年用于滞后变量和滚动窗口预热。
-- 2022-01-01 至 2025-12-31 是单独封存的样本外分区。因子 IC 没有使用该分区。
-- 流动性资格按时点计算：过去 242 个交易日的成交额中位数不低于 5 亿元；窗口不足 242 个有效交易日时该品种不入池。当日主力合约成交量为正且收益有效。
+## 3. Factor Definitions
 
-### 2.2 因子集合与方向
+### 3.1 Basis-momentum factor
 
-研究程序共输出 80 个原始指标、信号及敏感性规格，主要分为：
+For contract-specific close-to-close returns \(r^{(1)}\) and \(r^{(2)}\) on the dominant and second-dominant contracts:
 
-1. \(\operatorname{CROWD1/2/3}\) 及极端分位信号；
-2. \(C_{\mathrm{LONG}}\)、\(C_{\mathrm{SHORT}}\)、\(\operatorname{SLOPE\_LONG}\)、\(\operatorname{SLOPE\_SHORT}\)、\(\operatorname{POWER}\)；
-3. \(\operatorname{SPIDER\_FREE}\)、\(\operatorname{SPIDER\_HOLIDAY}\)、\(\operatorname{SPIDER\_ACTIVE}\) 及同覆盖对照；
-4. \(K_{DB}\)、\(K_{DS}\)、\(K_{\mathrm{NET\_SHARE}}\)、\(K_{\mathrm{NET},10/20/60/120}\) 及不同变化幅度门槛；
-5. \(\operatorname{FLOW\_CONTROL}\) 及成交榜会员持仓流等敏感性指标。
-
-信号符号在 `research/settings.py` 中事先固定：拥挤度按反转计分；一致性、净多头占比变化和会员持仓流按顺势计分。
-
-### 2.3 收益标签、IC 与显著性
-
-信号日为 \(t\)。次日标签使用 \(t+1\) 日主力合约的开盘价买入，并使用同一合约 \(t+2\) 日开盘价退出：
-
-$$
-r_{i,t+1}
-= \frac{O_{i,t+2}^{(c_{i,t+1})}}{O_{i,t+1}^{(c_{i,t+1})}} - 1.
-$$
-
-五日标签为信号日之后连续五段开盘到开盘收益的复合回报。时序检验与截面检验使用同一标签、流动性筛选、因子集合和经济方向，最少需要 120 个有效观测，只在切片方式上不同：
-
-- **截面 IC**：每日对商品的因子得分和未来收益计算 Spearman 相关，再对逐日 IC 求均值。全市场检验使用 20 阶 Newey–West/HAC 标准误。
-- **时序 IC**：对每个商品分别计算其因子序列与后续收益序列的 Spearman 相关。汇总的方向一致性检验对预设方向调整后的逐商品 IC 做单侧精确二项符号检验。
-
----
-
-## 3. 因子结果
-
-### 3.1 显著性总览
-
-下图汇总次日截面、五日截面和逐品种时序结果。IC 均按事先设定的经济方向计分；负 IC 也按原方向展示。
-
-![会员持仓因子的 IC 与显著性](../runs/research/xs_position/factor_significance.png)
-
-### 3.2 次日全市场截面 IC
-
-| 因子（预设计分方向） | 平均 IC | HAC \(t\) | 原始 \(p\) | \(q_{\mathrm{primary}}\) | \(q_{\mathrm{all}}\) | 有效日 | 平均品种数 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| **\(-K_{DS}\)，空头持仓增量反号** | **+0.02007** | **+4.01** | **0.00006** | **0.00093** | **0.02167** | **1,459** | **38.99** |
-| \(\operatorname{SLOPE\_SHORT}_{20}\)，短阵营净持仓斜率 | +0.03626 | +2.83 | 0.00470 | 0.03524 | 0.23680 | 440 | 11.13 |
-| \(K_{DB}\)，多头持仓增量 | −0.01332 | −2.67 | 0.00758 | 0.03792 | 0.25353 | 1,459 | 38.99 |
-| \(K_{\mathrm{NET\_SHARE}}\)，榜单净多头占比 | +0.01359 | +2.57 | 0.01012 | 0.03794 | 0.31136 | 1,459 | 38.99 |
-
-\(-K_{DS}\) 是唯一通过 \(q_{\mathrm{all}}\) 的次日截面因子。其余三项只通过较窄的主检验。\(\operatorname{SLOPE\_SHORT}_{20}\) 覆盖较少，IC 从 2016–2018 年的 −0.02929 转为 2019–2021 年的 +0.04391。\(K_{DB}\) 的次日关系与原定顺势方向相反；\(K_{\mathrm{NET\_SHARE}}\) 在两个半期均为正，但 IC 从 +0.02063 降至 +0.00651。
-
-### 3.3 五日全市场截面 IC
-
-| 因子（预设计分方向） | 五日 IC | HAC \(t\) | 原始 \(p\) | \(q_{\mathrm{primary}}\) | \(q_{\mathrm{all}}\) | 有效日 | 平均品种数 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| **\(\operatorname{FLOW\_CONTROL}\)，会员净持仓流** | **+0.01809** | **+4.16** | **0.00003** | — | **0.02226** | **1,455** | **39.10** |
-| \(-K_{DS}\)，空头持仓增量反号 | +0.01360 | +2.82 | 0.00482 | 0.07223 | 0.25966 | 1,455 | 38.95 |
-| \(K_{DB}\)，多头持仓增量 | −0.00391 | −0.88 | 0.37937 | 0.48746 | 0.81937 | 1,455 | 38.95 |
-| \(\operatorname{POWER}_{20}\)，填补版一致性合力 | +0.02032 | +2.56 | 0.01032 | — | 0.39862 | 1,455 | 38.81 |
-| \(K_{\mathrm{NET\_SHARE}}\)，榜单净多头占比 | +0.02550 | +2.20 | 0.02795 | 0.20772 | 0.65123 | 1,455 | 38.95 |
-
-五日截面只有 \(\operatorname{FLOW\_CONTROL}\) 通过该窗口的 \(q_{\mathrm{all}}\)。\(-K_{DS}\) 的未校正方向为正但未通过主族或全规格校正；\(K_{DB}\) 的相关方向为负且不显著。其余指标的原始 \(p\) 值不替代多重检验结果。\(\operatorname{POWER}_{20}\) 与 \(\operatorname{FLOW\_CONTROL}\) 不属于主检验族，故 \(q_{\mathrm{primary}}\) 为空。
-
-### 3.4 逐品种时序 IC
-
-| 因子（预设计分方向） | 平均逐品种 IC | 中位数 | 正 IC 商品数 | 单侧符号检验 \(p\) | BH \(q\) |
-|---|---:|---:|---:|---:|---:|
-| **\(-K_{DS}\)，空头持仓增量反号** | **+0.02386** | **+0.02669** | **39 / 51（76.5%）** | **0.00010** | **0.00673** |
-| \(\operatorname{FLOW\_CONTROL}\)，会员净持仓流 | +0.02039 | +0.01904 | 36 / 51（70.6%） | 0.00230 | 0.07822 |
-
-\(-K_{DS}\) 同时通过次日截面和时序方向一致性检验。次日全规格校正后其 \(q_{\mathrm{all}}\) 为 0.02167。\(\operatorname{FLOW\_CONTROL}\) 的逐品种正向比例较高，符号检验经因子间 BH 校正后未达 \(q<0.05\)。
-
-### 3.5 主要因子的公式与经济含义
-
-记商品为 \(i\)，交易日为 \(t\)，合约为 \(c\)，会员为 \(j\)。\(L\) 和 \(S\) 分别表示会员多头、空头持仓；\(B^{20}\)、\(D^{20}\) 是合约前 20 名会员多、空持仓合计；\(\Delta\) 表示相邻交易日变化。
-
-#### 空头持仓增量反号 \(-K_{DS}\)
-
-令 \(C_{i,t}\) 为同日多空两侧均有排名披露的合约集合，则：
-
-$$
-K_{DS,i,t} = \sum_{c\in C_{i,t}} \Delta D^{20}_{c,t},
-\qquad
-x^{K_{DS}}_{i,t} = -K_{DS,i,t}.
-$$
-
-\(K_{DS}\) 是披露空头头寸的变化总量。研究方向预先设为反号，因此正分表示披露空头减仓或空头增加较弱。策略卫星再按披露合约持仓量标准化，并加上滚动分位门槛。交易信号与 IC 检验中的原始指标不是同一个对象。
-
-#### 短阵营净头寸斜率 \(\operatorname{SLOPE\_SHORT}_{20}\)
-
-会员净头寸为 \(N_{j,\tau}=L_{j,\tau}-S_{j,\tau}\)。对过去 20 日净头寸完整的会员，按当日净头寸取最低的 5 名组成 \(J^-_t\)，并对阵营合计净头寸做 OLS 时间斜率：
-
-$$
-A^-_{\tau} = \sum_{j\in J^-_t} N_{j,\tau},
-\qquad
-\operatorname{SLOPE\_SHORT}_{20,t}
-=
-\frac{\sum_{\tau=t-19}^{t}(\tau-\bar{\tau})(A^-_{\tau}-\bar{A}^-)}
-{\sum_{\tau=t-19}^{t}(\tau-\bar{\tau})^2}.
-$$
-
-该指标次日 \(q_{\mathrm{primary}}=0.03524\)，\(q_{\mathrm{all}}=0.23680\)。平均可用商品数仅 11.13，两个半期的 IC 方向相反。
-
-#### 多头会员持仓增量 \(K_{DB}\)
-
-$$
-K_{DB,i,t} = \sum_{c\in C_{i,t}} \Delta B^{20}_{c,t}.
-$$
-
-原方向下的次日 IC 为负，主检验通过、全检验未通过。该关系不用于事后翻转交易方向。
-
-#### 榜单净多头占比 \(K_{\text{NET\_SHARE}}\)
-
-令 \(OI_{c,t}\) 为合约总持仓：
-
-$$
-K_{\text{NET\_SHARE},i,t}
-=
-\frac{\sum_{c\in C_{i,t}}(B^{20}_{c,t}-D^{20}_{c,t})}
-{\sum_{c\in C_{i,t}}OI_{c,t}}.
-$$
-
-这是占比水平。\(K_{\mathrm{NET},60}\) 等是该占比的差分，水平与变化是不同指标。
-
-#### 会员持仓流 \(\operatorname{FLOW\_CONTROL}\)
-
-令 \(OI^{mkt}_{i,t}\) 为商品主力市场持仓量：
-
-$$
-\operatorname{FLOW\_CONTROL}_{i,t}
-=
-\frac{\sum_j \Delta L_{j,t}-\sum_j \Delta S_{j,t}}
-{OI^{mkt}_{i,t}}.
-$$
-
-该指标的五日截面 IC 通过全检验校正，但逐品种时序符号检验未通过校正。组合试验中将其作为独立对照，不将统计显著直接解释成组合增益。
-
-#### 拥挤度与蜘蛛网对照
-
-\(\operatorname{CROWD1}\) 在成交活跃会员中计算净持仓占总持仓的比例。令 \(V^{seat}_{j,t}\) 为会员成交量，\(V^{mkt}_{i,t}\) 和 \(OI^{mkt}_{i,t}\) 为市场成交量和持仓量；纳入会员集合为
-\(J_{i,t}=\{j:V^{seat}_{j,t}/(L_{j,t}+S_{j,t})\ge V^{mkt}_{i,t}/OI^{mkt}_{i,t}\}\)，则
-
-$$
-\operatorname{CROWD1}_{i,t}
-=
-\frac{\sum_{j\in J_{i,t}}(L_{j,t}-S_{j,t})}
-{\sum_{j\in J_{i,t}}(L_{j,t}+S_{j,t})}.
-$$
-
-\(\operatorname{SPIDER\_FREE}\) 汇总披露合约上会员多、空持仓变化。令
-\(G_B=\sum_c\Delta B^{20}_{c,t}\)、\(G_D=\sum_c\Delta D^{20}_{c,t}\)，当 \(G_B>0,G_D<0\) 时信号为 +1；当 \(G_B<0,G_D>0\) 时信号为 −1；其余情形为 0。该离散指标作为报告中的对照信号，未通过五日全检验校正。
-
-#### 一致性合力 \(\operatorname{POWER}\)
-
-填补口径中，若会员只出现在单侧榜单，缺失侧按该侧当日榜末持仓的一半补齐。过去 20 日持仓完整的会员按末日净头寸排序，最高 5 名构成净多阵营 \(J^+\)，最低 5 名构成净空阵营 \(J^-\)。\(C^+\)、\(C^-\) 分别为两阵营会员净头寸时间序列的两两相关系数均值；\(A^+_\tau\)、\(A^-_\tau\) 为阵营合计净头寸：
-
-$$
-\operatorname{POWER}_{20,t}
-=
-C^+_t\,\operatorname{slope}(A^+)
-- C^-_t\,\bigl(-\operatorname{slope}(A^-)\bigr).
-$$
-
-填补后的 \(\operatorname{POWER}_{20}\) 五日截面 IC 为 +0.02032，\(q_{\mathrm{all}}=0.39862\)，未通过多重检验。
-
-### 3.6 因子结论
-
-- **跨截面与时序均有支持：** \(-K_{DS}\)。次日全市场截面 \(q_{\mathrm{all}}=0.02167\)，逐品种时序符号检验的 BH 校正 \(q=0.00673\)。
-- **只在特定预测窗口有支持：** \(\operatorname{FLOW\_CONTROL}\)。五日截面 \(q_{\mathrm{all}}=0.02226\)；同一因子的逐品种符号检验 \(q=0.07822\)。
-- **只通过主检验：** \(\operatorname{SLOPE\_SHORT}_{20}\)、\(K_{DB}\)、\(K_{\mathrm{NET\_SHARE}}\)。三者 \(q_{\mathrm{primary}}<0.05\)，\(q_{\mathrm{all}}>0.05\)。
-- 其余因子未通过上述门槛。未校正的 IC、个别行业切片，以及后文的组合收益，都不改写这组统计结论。
-
-这些检验描述预测关系，不直接等价于可交易收益。当前策略规格及研究期回测结果见第 4 节。
-
-### 3.7 经济先验因子补充研究
-
-在同一研究期内另行预先指定三个经济因子，方向、窗口与主族在计算结果前固定；这一候选族与会员持仓因子的主族、全规格族分开校正。次日截面主族包含三项因子，完整规格族包含三项因子的次日和五日标签。逐品种时序符号检验作为独立族，至少 120 个配对日。详细结果见 [candidate_ic.csv](../runs/research/economic_ic/candidate_ic.csv)，可用 `python -m research candidate-ic` 复跑。
-
-| 因子（预设方向） | 窗口 | 预测期 | 平均 IC | HAC \(t\) | 原始 \(p\) | 主族 \(q\) | 完整族 \(q\) | 有效日 | 平均品种数 | 2016–2018 / 2019–2021 |
-|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| **期限结构：年化展期收益，正值代表近月高于远月** | 当日 | 次日 | **+0.02200** | **+3.57** | **0.00036** | **0.00107** | **0.00214** | 1,459 | 39.97 | +0.02028 / +0.02373 |
-| 期限结构：年化展期收益 | 当日 | 五日 | +0.03972 | +2.97 | 0.00298 | — | 0.00596 | 1,455 | 39.93 | +0.03946 / +0.03999 |
-| **价格趋势：过去 242 日复合收益，跳过最近 21 日** | 12–1 月 | 次日 | **+0.02464** | **+3.27** | **0.00109** | **0.00163** | **0.00326** | 1,459 | 38.39 | +0.02253 / +0.02675 |
-| 价格趋势：过去 242 日复合收益，跳过最近 21 日 | 12–1 月 | 五日 | +0.04079 | +2.45 | 0.01416 | — | 0.02124 | 1,455 | 38.35 | +0.03694 / +0.04467 |
-| 仓单下降：滞后 1 日的 20 日仓单下降 / 市场持仓量 | 20 日 | 次日 | +0.00483 | +1.15 | 0.24855 | 0.24855 | 0.29826 | 1,459 | 39.93 | +0.00753 / +0.00211 |
-| 仓单下降：滞后 1 日的 20 日仓单下降 / 市场持仓量 | 20 日 | 五日 | +0.00737 | +0.88 | 0.37683 | — | 0.37683 | 1,455 | 39.89 | +0.01402 / +0.00066 |
-
-期限结构有库存持有成本与便利收益的经济解释：近月相对远月升水（backwardation）反映即时可交割资源偏紧，方向预设为顺势。价格趋势项按过去 242 个交易日复合收益计算，并跳过最近 21 日，以降低短期反转污染。仓单下降是可观察库存收缩的代理，使用前一交易日仓单、并按前一日市场持仓量标准化，以避免同日发布时间不确定带来的前视。
-
-期限结构与 12–1 月动量在次日主族及完整规格族均通过 BH 校正，且两个半期截面 IC 同向；仓单变化未通过校正。**两项显著结果目前只显示截面预测关系**：逐品种时序检验均未通过 BH（期限结构 24/53 个正 IC 商品，\(q=0.79495\)；动量 29/50，\(q=0.48335\)；仓单变化 27/52，\(q=0.66741\)）。
-
-### 3.8 截面稳健性检验
-
-目的：在研究期内找出做多强品种、做空弱品种两端都能获利，且不依赖单一市场状态的截面因子。因子、方向、预测期、状态划分与通过标准在计算前写入 `research/xs_robustness.py` 的文档字符串，结果出来后没有改动。可用 `python -m research xs-robustness` 复跑。
-
-- **因子与方向**：期限结构（+）、12–1 月动量（+）、基差动量（+，主力减次主力的 242 日复合收益，Boons & Prado 2019）、242 日偏度（−，Fernandez-Perez 等 2018）；会员族为 \(K_{DB}\)/持仓（+）、\(-K_{DS}\)/持仓（+）、\(\operatorname{FLOW\_CONTROL}\)（+）、\(K_{\mathrm{NET\_SHARE}}\)（+）。\(K_{DB}\)、\(K_{DS}\) 除以商品总持仓，避免截面排序被持仓规模主导。
-- **标签**：信号日后连续 5、10、20 段开盘到开盘收益连乘；HAC 滞后取 \(\max(20, 2h)\)。主族 8 因子 × 3 预测期共 24 项，一次 BH。
-- **通过标准**（以 10 日为判定口径）：R1 任一预测期主族 \(q<0.05\)；R2 过去 60 日等权池收益为正与非正两种状态下 IC 均为正；R3 过去 60 日等权池波动高于与不高于其扩展中位数两种状态下 IC 均为正；R4 六个年度中至少 5 年 IC 为正；R5 前 20% 减池均值、池均值减后 20% 两条腿都为正。
-
-| 因子（10 日） | IC | HAC \(t\) | 最小 \(q\) | 多头腿 bp | 空头腿 bp | 下跌 / 上涨状态 IC | 高 / 低波动 IC | 正 IC 年数 | 两端名单日替换 | 通过 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|:-:|
-| 期限结构 | +0.0457 | +2.58 | 0.0179 | +18.9 | +28.8 | +0.094 / +0.026 | +0.040 / +0.052 | 5 | 8.2% | ✓ |
-| 12–1 月动量 | +0.0508 | +2.25 | 0.0283 | +29.0 | +27.3 | +0.057 / +0.048 | +0.052 / +0.050 | 6 | 5.6% | ✓ |
-| 基差动量 | +0.0421 | +2.61 | 0.0199 | +29.6 | +26.3 | +0.056 / +0.037 | +0.035 / +0.050 | 6 | 6.6% | ✓ |
-| −偏度 | +0.0362 | +2.31 | 0.0240 | +21.4 | +29.0 | +0.036 / +0.036 | +0.042 / +0.030 | 6 | 3.5% | ✓ |
-| \(K_{\mathrm{NET\_SHARE}}\) | +0.0320 | +2.06 | 0.0447 | +16.0 | +20.0 | +0.037 / +0.030 | +0.037 / +0.026 | 6 | 10.2% | ✓ |
-| \(\operatorname{FLOW\_CONTROL}\) | +0.0173 | +3.36 | 0.0008 | +17.9 | +1.8 | +0.016 / +0.018 | +0.021 / +0.013 | 5 | 76.5% | ✓ |
-| \(-K_{DS}\)/持仓 | +0.0149 | +2.51 | 0.0115 | +16.3 | −3.2 | +0.003 / +0.020 | +0.014 / +0.016 | 5 | 76.3% | R5 未过 |
-| \(K_{DB}\)/持仓 | −0.0002 | −0.04 | 0.5655 | +8.3 | −6.0 | +0.014 / −0.006 | −0.001 / +0.000 | 4 | 77.1% | 全未过 |
-
-价格类四项与净多头占比的两端都赚钱，且在池收益为负的状态下 IC 不低于上涨状态。会员持仓流类（\(\operatorname{FLOW\_CONTROL}\)、\(-K_{DS}\)）的收益几乎全在多头腿，名单每天替换约 76%，所以单按持仓流做两端多空时，收益集中在多头一侧，且会被成本吞没。\(K_{DB}\)/持仓与 \(-K_{DS}\)/持仓的截面秩相关为 −0.76，二者主要反映前 20 名总持仓增减，不构成独立的多、空两条信息。期限结构、动量、基差动量两两秩相关 0.43–0.51，不是三份独立证据；偏度与其余因子相关接近 0。期限结构与 12–1 月动量此前已在第 3.7 节同一窗口检验过，本节结果仍是样本内证据。
-
-逐年 IC、逐年两腿收益、因子相关与逐日 IC 见 [factor_horizons.csv](../runs/research/xs_robustness/factor_horizons.csv)、[robustness_checks.csv](../runs/research/xs_robustness/robustness_checks.csv)、[ic_by_year.csv](../runs/research/xs_robustness/ic_by_year.csv)、[legs_by_year.csv](../runs/research/xs_robustness/legs_by_year.csv) 与 [factor_rank_correlation.csv](../runs/research/xs_robustness/factor_rank_correlation.csv)。
-
-#### 席位行为提纯补充检验（`STICKY_NET_SHARE` vs `SPEC_NET_SHARE`）
-
-针对传统全前 20 席位 `K_NET_SHARE` 在 2019–2021 年衰减的问题，利用已有 `CROWD1` 日内换手率阈值（不新增调优阈值），将有席位披露日全部前 20 多/空上榜席位拆分为两类互斥结构并作为独立事后检验族（\(2\times 3 = 6\) 项单独做 BH 校正 `q_seat`，不改动主族 `q_primary`）：
-
-- **`SPEC_NET_SHARE`**（高换手活跃席位：进入前 20 成交榜且 \(V/(L+S) \ge V_{mkt}/OI_{mkt}\)）：`h=10` 截面 IC 为 **`−0.0208`**（HAC \(t=-2.00\)，6 年仅 1 年为正，未通过 R2–R5），证实高频/通道活跃席位隔夜净头寸不提供中周期方向增量、反而是噪音来源；
-- **`STICKY_NET_SHARE`**（粘性与单边重仓席位：保留全部单边未进成交榜席位及低换手 \(V/(L+S) < V_{mkt}/OI_{mkt}\) 席位）：`h=10` 截面 IC 从 `K_NET_SHARE` 的 `+0.0320`（\(t=+2.06\)）显著抬升至 **`+0.0416`**（HAC \(t=+2.95\)，`q_seat=0.0096`），2016–2018 与 2019–2021 分别达到 `+0.0530` 与 `+0.0301`（后半期提升约 30%），多空两腿分别贡献 `+13.0 bp` 与 `+37.6 bp`（多空价差 `+50.6 bp`），全市场下跌/上涨与高/低波动状态及 6 个年度全部为正（全部通过 R1–R5），且与 `ROLL_YIELD`（+0.30）、`BASIS_MOM_242`（+0.19）、`−SKEW_242`（−0.07）相关性更低。结果保存于 [seat_purified.csv](../runs/research/xs_robustness/seat_purified.csv)。
-
----
-
-## 4. 当前策略：STICKY_CORE_2X
-
-### 4.1 规则与经济原理
-
-规则写入 `strategies/sticky_core.py`，在 `FLOW_BASIS` 退役与席位行为提纯检验之后确立（见[历史档案](history.md)），采用**“三个低相关核心经济维度 + 零脆弱硬过滤”**的极简结构：
-
-- **候选池**：当日在流动性池内，且三个因子均有效（\(N_{\text{cand}} \ge 8\)）的商品期货品种；不再额外设 `~rolled` 剔除或 `CROWD1` 留现金否决门槛，确保资金利用率稳定。
-- **核心三因子**（均在 \(t\) 日收盘后仅用截至 \(t\) 日数据计算，截面百分位秩等权平均）：
-  1. **基差动量 `BASIS_MOM_242`（+）**：主力与次主力各自同合约日收益的 242 日复合收益之差（Boons & Prado 2019），捕捉期限结构斜率变化与库存边际收紧，克服单纯即期展期收益在 2021 极端反向挤仓中的均值回复脆弱性（与后两者仅正/低相关，6/6 年度为正）；
-  2. **负向偏度 `−SKEW_242`（−）**：过去 242 日（至少 200 日）主力日收益偏度取反（Fernandez-Perez et al. 2018），赚取投资者高估正偏“彩票型”商品、低估负偏品种的尾部风险补偿，与基本面及持仓因子近乎完全正交（截面秩相关 `−0.07` ~ `+0.03`）；
-  3. **粘性席位净多头占比 `STICKY_NET_SHARE`（+）**：剔除高换手活跃噪音席位后的前 20 席位净多头占比 \((L-S)/(L+S)\)，赚取产业及长线机构持久化对冲压力失衡所带来的风险溢价。
-- **选样与配权**：每日取综合得分前 \(\lceil 20\% N\rceil\) 做多（合计 `+0.50` 名义权重，侧内等权）与后 \(\lceil 20\% N\rceil\) 做空（合计 `−0.50` 名义权重，侧内等权）。
-- **持有**：每日一批，重叠 10 个交易日（与稳健性检验期 `h=10` 一致），次日开盘成交；2010–2015 仅用于窗口预热。
-- **固定组合与对照**：活动策略为下单前权重乘数 `2.0X`、单品种名义上限 `20%` 的 `STICKY_CORE_2X`；仅同时报告 `LONG_ONLY_BMK` 动态等权基准。
-
-账户采用 1,000 万元初始资金、历史手续费、整数手、20% 保证金率、50% 账户保证金上限、前 20 日成交量中位数 1% 开仓容量限制，报告口径为每边 1 tick（2 tick 结果同存于 CSV）；换月平旧开新双边计入换手与成本，组合强制多空配平（`neutral=True`）。
-
-### 4.2 研究期回测
-
-仅在研究期 `2016-01-04` 至 `2021-12-31` 回测，绝不读取 `data/oos/`。下表为每边 1 tick：
-
-| 组合 | 期末权益（万元） | 净年化 | 夏普 | 最大回撤 | 日换手 | 平均实际总敞口 | 平均净敞口 | 保证金峰值 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 动态等权基准 | 1,893.06 | +10.98% | 1.21 | −13.96% | 4.26% | 89.76% | +89.76% | 19.08% |
-| **STICKY_CORE_2X** | **1,991.26** | **+12.06%** | **1.06** | **−18.72%** | **18.67%** | **193.16%** | **−0.74%** | **40.09%** |
-
-- **固定 2X 成果**：在放宽单品种名义上限至 `20%` 后避免强信号截断，固定组合实现 **`+12.06%` 净年化、1.06 夏普、1,991.26 万元期末权益**（超过同期等权商品多头基准），保证金峰值仅 `40.09%`。每边 `2 tick` 压力下仍保持 **`+10.40%` 净年化、0.92 夏普**。
-- **成本与分年稳健性**：固定组合毛损益 `+1,166.96 万元`、手续费 `29.49 万元`、滑点 `146.21 万元`。尤为关键的是在 2021 年 10–11 月煤炭及黑色系政策剧烈反转期间，`−SKEW_242` 与 `BASIS_MOM_242` 的正交分散使固定组合全年收益保持在 `+0.55%`，有效对冲了单边挤仓崩盘风险。
-
-| 年份 | 动态等权基准 | STICKY_CORE_2X |
-|---|---:|---:|
-| 2016 | +36.73% | +20.03% |
-| 2017 | +4.90% | +14.55% |
-| 2018 | −3.61% | +12.64% |
-| 2019 | +6.91% | −0.55% |
-| 2020 | +7.66% | +28.57% |
-| 2021 | +18.96% | +0.55% |
-
-1/2 tick 摘要、逐年收益、选样统计和净值图见 [research/summary.csv](../runs/strategies/sticky_core/research/summary.csv)、[research/yearly_returns.csv](../runs/strategies/sticky_core/research/yearly_returns.csv)、[research/selection_summary.csv](../runs/strategies/sticky_core/research/selection_summary.csv) 和 [research/performance.png](../runs/strategies/sticky_core/research/performance.png)。连续净值图见 [combined/performance.png](../runs/strategies/sticky_core/combined/performance.png)。
-
-### 4.3 样本外评价（2022–2025）
-
-在研究规则完全冻结后，按显式请求执行 `python -m backtest.engine sticky_core --partition oos --jobs 8` 评价 `2022-01-04` 至 `2025-12-31`（`2010–2021` 仅作窗口与资格预热；同时修复了 `src/data.py` 中 `build_daily_panel("oos")` 未衔接 `2021-12-31` 合约前收导致 `2022-01-04` 单日 `ret1`/`ret2` 缺失进而使 `BASIS_MOM_242` 在 2022 全年空仓的数据拼接问题，策略本身符号、窗口、合成与配权规则未做任何调整）。下表为每边 1 tick（2 tick 同存于 CSV）：
-
-| 组合 | 期末权益（万元） | 净年化 | 夏普 | 最大回撤 | 日换手 | 平均实际总敞口 | 平均净敞口 | 保证金峰值 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 动态等权基准 | 1,009.07 | +0.50% | 0.07 | −15.07% | 4.62% | 75.72% | +75.72% | 16.36% |
-| **STICKY_CORE_2X** | **1,390.19** | **+8.60%** | **0.99** | **−12.72%** | **20.25%** | **183.21%** | **−1.83%** | **38.73%** |
-
-| 年份 | 动态等权基准 | STICKY_CORE_2X |
-|---|---:|---:|
-| 2022 | +7.68% | +14.64% |
-| 2023 | +4.24% | −6.95% |
-| 2024 | −5.58% | +10.55% |
-| 2025 | −4.79% | +17.89% |
-
-样本外四年同期等权商品多头基准录得 `+0.50%` 净年化（夏普 `0.07`，2024–2025 连续两年回撤），固定 `STICKY_CORE_2X` 实现 **+8.60% 净年化、0.99 夏普、−12.72% 最大回撤**（2022、2024、2025 三年正收益）；在每边 `2 tick` 压力下仍保持 `+7.29%` 净年化、夏普 `0.84`。1/2 tick 摘要、逐年收益、选样统计与净值图见 [oos/summary.csv](../runs/strategies/sticky_core/oos/summary.csv)、[oos/yearly_returns.csv](../runs/strategies/sticky_core/oos/yearly_returns.csv)、[oos/selection_summary.csv](../runs/strategies/sticky_core/oos/selection_summary.csv) 和 [oos/performance.png](../runs/strategies/sticky_core/oos/performance.png)。
-
-### 4.4 策略赚的是什么钱
-
-这套策略的核心不是押一个品种长期涨跌，而是在商品截面里买入相对强、卖出相对弱，同时用三个来源相对独立的信息降低对单一市场叙事的依赖。
-
-当前持仓结构因子只保留 `STICKY_NET_SHARE`。它是剔除高换手活跃席位后的前二十席位净多头占比，与基差动量和负向偏度共同构成当前三因子策略。
-
-基差动量赚的是期限结构变化形成的截面溢价。主力合约与次主力合约过去的复合收益之差表示，某个品种相对远月最近是在收紧还是在走宽；基础价格趋势下坡的品种容易转成反向题材，而供需变化使近月相对远月定价发生变化时，该因子捕捉的是变化的持续性，不押期限结构的绝一静止水平。
-
-负向偏度赚的是尾部风险定价错位。原始偏度常把正向大涨品种标成“彩票型”，把负偏品种标成尾部风险更集中的品种。取反后，负偏度高、正偏度低的品种得到正分。在截面上，这相当于卖出被市场追捧的极端正向跳跃收益、持有愿意提供尾部保险补偿的品种；它不是短期择时，而是一年级到日尺度的尾部风险溢价。
-
-粘性席位净多头占比赚的是产业和长线资金的筹码结构溢价。交易所前二十席位不能直接等同于具体账户，但低换手席位和只出现在单边榜上的重仓席位更可能代表产业套保、机构调仓或相对稳定的持仓方向。剔除高换手活跃席位后，净多头占比偏高的品种通常意味着可见的空头对冲压力或多头真实占用正在累积。这里没有把席位名册当成基本面事实，只把它当作与价格、期限结构互补的持仓状态。
-
-三者合在一起可被理解为三类风险溢价：期限结构变化、尾部风险补偿和持仓结构失衡。等权秩合成则刻意不把某一个因子的短期涨幅放大到组合权重里；若某因子在某段时间出现大幅领先，也只影响它在品种截面中的排名，不直接提高杠杆。
-
-持有十个交易日不追求每周最大的名目收益，而是让慢变量信号与执行周期配合。新鲜权重每日生成、十日重叠，价格形成在收盘后，成交移到下一交易日开盘，避免把收盘后未知的成交和持仓用作当日收益。
-
-## 附录：因子公式汇总
-
-这一节把研究中被检验过的主要会员持仓因子和经济因子集中列在同一份报告里。下面公式是因子定义，不代表都进入当前策略。
-
-记商品为 \(i\)、交易日为 \(t\)、合约为 \(c\)、会员为 \(j\)。\(L_{j,t}\)、\(S_{j,t}\)、\(V_{j,t}\) 是会员多头持仓、空头持仓和成交量；\(\Delta\) 是交易所披露的较前一交易日变化；\(B^{20}_{c,t}\)、\(D^{20}_{c,t}\) 是合约前二十名的多空持仓合计；\(OI^{mkt}_{i,t}\)、\(V^{mkt}_{i,t}\) 是商品市场持仓量和成交量。
-
-### 拥挤度
-
-\[
-\operatorname{NET\_SHARE}_{J,t}
-=\frac{\sum_{j\in J}(L_{j,t}-S_{j,t})}
-{\sum_{j\in J}(L_{j,t}+S_{j,t})}.
-\]
-
-`CROWD1` 的席位集合为成交换手不低于市场换手的席位：
-\[
-J_{i,t}^{1}
-=\left\{j:\frac{V_{j,t}}{L_{j,t}+S_{j,t}}
-\ge\frac{V^{mkt}_{i,t}}{OI^{mkt}_{i,t}}\right\}.
-\]
-
-`CROWD2` 衡量持仓调整与成交的比例：
-\[
-\frac{| \Delta L_{j,t}|+|\Delta S_{j,t}|}{V_{j,t}}
-\ge
-\frac{|\Delta OI^{mkt}_{i,t}|}{V^{mkt}_{i,t}}.
-\]
-
-`CROWD3` 将上述流量和成交分别按三日或四日窗口汇总，再与市场持仓变化、市场成交量作同样比较。商品研究固定使用反转方向，不把拥挤度信号解释成顺势。
-
-### 一致性
-
-会员净头寸为 \(N_{j,t}=L_{j,t}-S_{j,t}\)。过去 20 日或 60 日中持续在榜的会员按末日净头寸排序，最高五名为净多阵营 \(J^+\)，最低五名为净空阵营 \(J^-\)。\(C^+\)、\(C^-\) 是阵营内净头寸序列两两相关均值，\(A^+_\tau=\sum_{j\in J^+}N_{j,\tau}\)，\(A^-_\tau=\sum_{j\in J^-}N_{j,\tau}\)。合力为：
-\[
-\operatorname{POWER}_{w,t}
-=C^+_t\,\operatorname{slope}(A^+)
--C^-_t\,[-\operatorname{slope}(A^-)].
-\]
-
-严格口径要求两侧会员都足够连续在榜；因商品中严格池覆盖不足，敏感性口径允许缺失的一侧按该侧榜末持仓的一半填补。
-
-### 蜘蛛网与持仓流
-
-对同日同时披露多、空榜的合约集合 \(C_{i,t}\)，令：
-\[
-K_{DB,i,t}=\sum_{c\in C_{i,t}}\Delta B^{20}_{c,t},
-\qquad
-K_{DS,i,t}=\sum_{c\in C_{i,t}}\Delta D^{20}_{c,t}.
-\]
-
-其中 \(-K_{DS}\) 是当前持仓研究里证据较完整的会员持仓指标；正值表示可见空头在减仓或增加较少。
-
-净多头占比为：
-\[
-K_{\mathrm{NET\_SHARE},i,t}
-=
-\frac{\sum_{c\in C_{i,t}}(B^{20}_{c,t}-D^{20}_{c,t})}
-{\sum_{c\in C_{i,t}}OI_{c,t}}.
-\]
-
-会员持仓流为：
-\[
-\operatorname{FLOW\_CONTROL}_{i,t}
-=
-\frac{\sum_j\Delta L_{j,t}-\sum_j\Delta S_{j,t}}
-{OI^{mkt}_{i,t}}.
-\]
-
-该指标不要求多、空变化发生在同一合约。研究显示它最适合五日截面，对十日两端名单替换太快，不适合作为当前组合的独立因子。
-
-### 当前席位因子的提纯
-
-本仓库用前二十成交榜的换手门槛把会员拆成互斥的粘性席位和活跃席位：
-\[
-\operatorname{HIGH\_TURNOVER}_{j,t}
-=
-\mathbf 1\left[
-\frac{V_{j,t}}{L_{j,t}+S_{j,t}}
-\ge
-\frac{V^{mkt}_{i,t}}{OI^{mkt}_{i,t}}
-\right].
-\]
-
-代入净多头占比可得到：
-\[
-\operatorname{STICKY\_NET\_SHARE}_{i,t}
-=\operatorname{NET\_SHARE}_{J:\operatorname{HIGH\_TURNOVER}=0},
-\qquad
-\operatorname{SPEC\_NET\_SHARE}_{i,t}
-=\operatorname{NET\_SHARE}_{J:\operatorname{HIGH\_TURNOVER}=1}.
-\]
-
-前者在十日截面上为正，后者为负；这也是当前策略只保留粘性席位净多头占比的直接理由。
-
-### 经济先验因子
-
-基差动量使用主力和次主力各自的同合约日收益：
 \[
 \operatorname{BASIS\_MOM}_{242,i,t}
 =
@@ -422,30 +41,235 @@ K_{\mathrm{NET\_SHARE},i,t}
 -\left(\prod_{\tau=t-241}^{t}(1+r^{(2)}_{i,\tau})-1\right).
 \]
 
-期限结构使用主力相对次主力的年化展期收益：
-\[
-\operatorname{ROLL\_YIELD}_{i,t}
-=\text{annualized yield}_{i,t}^{(1)/(2)},
-\]
-正值表示近月相对远月升水。
+The factor is missing unless both 242-day series are complete.
 
-负向偏度为：
+Economic interpretation: changes in the slope of the futures curve. A positive score means the dominant contract has outperformed the second-dominant contract over the trailing year.
+
+### 3.2 Negative-skew factor
+
 \[
 \operatorname{NEG\_SKEW}_{242,i,t}
-=-\operatorname{Skew}_{242}(r^{(1)}_{i,t}),
-\]
-至少 200 个有效日。
-
-十二减一月动量跳过最近 21 日：
-\[
-\operatorname{MOM121}_{i,t}
-=
-\prod_{k=21}^{262}(1+r^{cc}_{i,t-k})-1.
+=-\operatorname{Skew}_{242}(r^{(1)}_{i,t})
 \]
 
-滞后一天的二十日仓单下降代理为：
+The skew window is 242 trading days with at least 200 valid observations.
+
+Economic interpretation: risk compensation for lottery-like positive skew and tail-risk aversion. The sign is negative for raw skew and positive for negative-skew compensation.
+
+### 3.3 Sticky-member net-share factor
+
+For member \(j\), let \(L_{j,t}\), \(S_{j,t}\), and \(V_{j,t}\) be long positions, short positions, and volume.
+
+The market turnover ratio is:
+
 \[
-\operatorname{WAREHOUSE\_DRAW}_{20,i,t}
+\operatorname{MarketTurnover}_{i,t}
 =
-\frac{W_{i,t-21}-W_{i,t-1}}{OI^{mkt}_{i,t-1}}.
+\frac{V^{market}_{i,t}}{OI^{market}_{i,t}}.
 \]
+
+A member is classified as high-turnover when:
+
+\[
+\frac{V_{j,t}}{L_{j,t}+S_{j,t}}
+\ge
+\operatorname{MarketTurnover}_{i,t}.
+\]
+
+The sticky set contains disclosed members outside that high-turnover set, including one-sided long or short positions that are valid and persistent:
+
+\[
+\operatorname{STICKY\_NET\_SHARE}_{i,t}
+=
+\frac{\sum_{j\in \operatorname{Sticky}_{i,t}}(L_{j,t}-S_{j,t})}
+{\sum_{j\in \operatorname{Sticky}_{i,t}}(L_{j,t}+S_{j,t})}.
+\]
+
+Missing members and zero gross positions are excluded from both numerator and denominator.
+
+Economic interpretation: persistent industrial hedgers and long-horizon institutions may show lower turnover than short-horizon active traders. The factor captures the visible net-position imbalance of the lower-turnover part of the top-20 member book.
+
+### 3.4 Composite score and weights
+
+Within the liquid candidate pool on day \(t\), rank the three factors cross-sectionally using percentile ranks:
+
+\[
+\operatorname{Score}_{i,t}
+=
+\frac{
+\operatorname{PctRank}(\operatorname{BASIS\_MOM}_{i,t})
++
+\operatorname{PctRank}(\operatorname{NEG\_SKEW}_{i,t})
++
+\operatorname{PctRank}(\operatorname{STICKY\_NET\_SHARE}_{i,t})
+}{3}.
+\]
+
+The equal-rank average avoids estimating in-sample factor weights.
+
+If at least eight names are valid, select the highest and lowest \(\lceil20\%N_t\rceil\) names. Long names receive a combined \(+0.50\) target weight and short names receive a combined \(-0.50\) target weight.
+
+Each fresh batch remains held for ten sessions:
+
+\[
+w_{i,t}^{held}
+=
+\frac{1}{10}\sum_{\ell=0}^{9}w_{i,t-\ell}^{fresh}.
+\]
+
+The close-formed weights trade at the next session's open.
+
+## 4. Factor Evidence
+
+### 4.1 Predictive test protocol
+
+The member-factor study tested 80 original and sensitivity indicators. It used:
+
+- Next-open label and five-session open-to-open label.
+- The same commodity universe, factor directions, and minimum pair requirement.
+- Time-series correlation for each symbol.
+- Cross-sectional rank correlation for the full market.
+- Benjamini-Hochberg correction within families defined before seeing results.
+
+The main economic-factor family contains the roll yield, 12-1 momentum, and warehouse drawdown.
+
+### 4.2 Economic-factor results
+
+| Factor | Horizon | Mean IC | HAC t | Primary q | Full q |
+|---|---|---:|---:|---:|---:|
+| Roll yield | 1 day | +0.02200 | +3.57 | 0.00107 | 0.00214 |
+| 12-1 momentum | 1 day | +0.02464 | +3.27 | 0.00163 | 0.00326 |
+| Warehouse drawdown | 1 day | +0.00483 | +1.15 | 0.24855 | 0.29826 |
+
+Roll yield and 12-1 momentum pass their predeclared economic-factor families. Warehouse drawdown does not.
+
+### 4.3 Cross-sectional robustness
+
+The five- and ten-session robustness tests use 5, 10, and 20-session labels. The following factors pass the 10-session robustness record.
+
+| Factor | 10-day IC | HAC t | Long-leg excess | Short-leg excess | Positive years |
+|---|---:|---:|---:|---:|---:|
+| Roll yield | +0.0457 | +2.58 | +18.9 bp | +28.8 bp | 5/6 |
+| 12-1 momentum | +0.0508 | +2.25 | +29.0 bp | +27.3 bp | 6/6 |
+| Basis momentum | +0.0421 | +2.61 | +29.6 bp | +26.3 bp | 6/6 |
+| Negative skew | +0.0362 | +2.31 | +21.4 bp | +29.0 bp | 6/6 |
+| K_NET_SHARE | +0.0320 | +2.06 | +16.0 bp | +20.0 bp | 6/6 |
+
+Flow control, -K_DS, and K_DB are not robust two-leg signals in the same 10-session family. Flow control is strongest over five sessions and mostly contributes to the long leg. -K_DS has stronger next-day and time-series evidence, but not the two-leg robustness record used by this strategy. K_DB is near zero in cross-sectional robustness testing.
+
+### 4.4 Seat-purity evidence
+
+Splitting the top-20 member book by the CROWD1 turnover threshold yields:
+
+| Seat set | 10-day IC | Interpretation |
+|---|---:|---|
+| Sticky members | +0.0416 | Positive, stable, and passes the stated robustness checks |
+| High-turnover active members | -0.0208 | Negative and unstable |
+
+The sticky member set is used by the active strategy. The high-turnover set is not used as a separate factor.
+
+## 5. Active Strategy
+
+The current strategy is `STICKY_CORE_2X`.
+
+It combines:
+
+1. `BASIS_MOM_242`
+2. `NEG_SKEW_242`
+3. `STICKY_NET_SHARE`
+
+The three factors are ranked independently inside the daily liquidity pool and averaged equally. No volatility inverse weighting, sector control, or extra member-flow factor is part of the active code.
+
+Execution assumptions:
+
+- Initial equity: RMB 10 million
+- Target-weight multiplier: 2.0X input to orders
+- Maximum name weight: 20%
+- Account margin cap: 50%
+- Flat margin: 20%
+- Integer lots
+- Historical commissions
+- One-tick and two-tick slippage cases
+- One tick per side is the report case
+- Roll closes the old contract and opens the new contract
+- Long and short gross weights are neutralized
+
+## 6. Research-Period Backtest
+
+Period: 2016-01-04 to 2021-12-31.
+
+The following table uses one tick per side.
+
+| Book | End equity, RMB 10k | Net annualized | Sharpe | Maximum drawdown | Daily turnover | Mean gross exposure | Margin peak |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Equal-weight benchmark | 1893.06 | 10.98% | 1.21 | -13.96% | 4.26% | 89.76% | 19.08% |
+| STICKY_CORE_2X | 1991.26 | 12.06% | 1.06 | -18.72% | 18.67% | 193.16% | 40.09% |
+
+The two-tick case preserves positive results:
+
+| Book | Net annualized | Sharpe |
+|---|---:|---:|
+| STICKY_CORE_2X | 10.40% | 0.92 |
+
+Annual returns:
+
+| Year | Benchmark | STICKY_CORE_2X |
+|---|---:|---:|
+| 2016 | +36.73% | +20.03% |
+| 2017 | +4.90% | +14.55% |
+| 2018 | -3.61% | +12.64% |
+| 2019 | +6.91% | -0.55% |
+| 2020 | +7.66% | +28.57% |
+| 2021 | +18.96% | +0.55% |
+
+## 7. Out-of-Sample Backtest
+
+Period: 2022-01-04 to 2025-12-31.
+
+The OOS panel retains 2010-2021 history for trailing-window warm-up. It does not rewrite the factor signs, windows, rank composition, holding period, or 2X input multiplier.
+
+The following table uses one tick per side.
+
+| Book | End equity, RMB 10k | Net annualized | Sharpe | Maximum drawdown | Daily turnover | Mean gross exposure | Margin peak |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Equal-weight benchmark | 1009.07 | 0.50% | 0.07 | -15.07% | 4.62% | 75.72% | 16.36% |
+| STICKY_CORE_2X | 1390.19 | 8.60% | 0.99 | -12.72% | 20.25% | 183.21% | 38.73% |
+
+The two-tick case:
+
+| Book | Net annualized | Sharpe |
+|---|---:|---:|
+| STICKY_CORE_2X | 7.29% | 0.84 |
+
+Annual returns:
+
+| Year | Benchmark | STICKY_CORE_2X |
+|---|---:|---:|
+| 2022 | +7.68% | +14.64% |
+| 2023 | +4.24% | -6.95% |
+| 2024 | -5.58% | +10.55% |
+| 2025 | -4.79% | +17.89% |
+
+## 8. Combined Result
+
+The combined curve applies OOS results by scaling the 2022-01-04 OOS NAV to the 2021-12-31 research-period NAV, preserving both partitions as separate backtest specifications.
+
+| Book | End equity, RMB 10k | Net annualized | Sharpe | Maximum drawdown |
+|---|---:|---:|---:|---:|
+| Equal-weight benchmark | 1910.23 | 6.80% | 0.81 | -15.07% |
+| STICKY_CORE_2X | 2768.22 | 10.68% | 1.03 | -18.72% |
+
+## 9. Output Files
+
+- Research summary: [summary.csv](../runs/strategies/sticky_core/research/summary.csv)
+- Research yearly returns: [yearly_returns.csv](../runs/strategies/sticky_core/research/yearly_returns.csv)
+- Research selection summary: [selection_summary.csv](../runs/strategies/sticky_core/research/selection_summary.csv)
+- Research performance chart: [performance.png](../runs/strategies/sticky_core/research/performance.png)
+- OOS summary: [summary.csv](../runs/strategies/sticky_core/oos/summary.csv)
+- OOS yearly returns: [yearly_returns.csv](../runs/strategies/sticky_core/oos/yearly_returns.csv)
+- OOS selection summary: [selection_summary.csv](../runs/strategies/sticky_core/oos/selection_summary.csv)
+- OOS performance chart: [performance.png](../runs/strategies/sticky_core/oos/performance.png)
+- Combined summary: [summary.csv](../runs/strategies/sticky_core/combined/summary.csv)
+- Combined yearly returns: [yearly_returns.csv](../runs/strategies/sticky_core/combined/yearly_returns.csv)
+- Combined equity curve: [equity_curves.csv](../runs/strategies/sticky_core/combined/equity_curves.csv)
+- Combined performance chart: [performance.png](../runs/strategies/sticky_core/combined/performance.png)

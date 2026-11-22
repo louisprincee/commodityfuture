@@ -1,0 +1,150 @@
+"""五日条件检验，样本固定为 2016–2021 年。
+
+仅使用两项条件与 STICKY_NET_SHARE 均有效的品种，日截面至少 20 个。
+先按粘性净多排序，两端各 ceil(20% N)，中间均分三组。在每组内
+按 FLOW_MA5 或粘性席位占全榜持仓的份额排序，取高、低各一半；
+奇数时留出中间一名，并按固定品种顺序处理同分。
+两个主检验为流量确认价差及规模放大价差，单独做 BH。两组各五个
+组内价差为诊断项，十项单独做 BH。全部均值用 20 阶 Newey–West。
+"""
+from __future__ import annotations
+
+from math import erfc, sqrt
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from joblib import Parallel, delayed
+
+import config as C
+import data as D
+from research.factors import member_tables, seat_turnover_groups
+from research.ic_study import _bh, forward_returns, return_matrix
+from research.member_smoothing import load_daily_flow, load_oos_daily_flow
+from research.xs_robustness import START, hac_t
+
+HOLD = 5
+MIN_NAMES = 20
+PRIMARY = ("flow_confirmation", "size_amplification")
+
+
+def sticky_quintiles(sticky: pd.DataFrame) -> pd.DataFrame:
+    n = sticky.notna().sum(axis=1)
+    edge = np.ceil(n / 5)
+    rank = sticky.rank(axis=1, method="first")
+    inner = n - 2 * edge
+    buckets = np.floor(rank.sub(edge + 1, axis=0).mul(3).div(inner.where(inner.gt(0)), axis=0)) + 2
+    buckets = buckets.mask(rank.le(edge, axis=0), 1).mask(rank.gt(n - edge, axis=0), 5)
+    return buckets.where(n.ge(MIN_NAMES), axis=0)
+
+
+def _halves(factor: pd.DataFrame, mask: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rank = factor.where(mask).rank(axis=1, method="first")
+    count = rank.notna().sum(axis=1)
+    half = count // 2
+    high = rank.gt(count - half, axis=0)
+    low = rank.le(half, axis=0)
+    return high, low
+
+
+def daily_contrasts(buckets, flow, size, labels) -> pd.DataFrame:
+    spreads = {}
+    for name, factor in (("flow", flow), ("size", size)):
+        for q in range(1, 6):
+            high, low = _halves(factor, buckets.eq(q))
+            spreads[f"{name}_q{q}"] = labels.where(high).mean(axis=1) - labels.where(low).mean(axis=1)
+    spreads["flow_confirmation"] = spreads["flow_q5"] + spreads["flow_q1"]
+    spreads["size_amplification"] = spreads["size_q5"] - spreads["size_q1"]
+    return pd.DataFrame(spreads)
+
+
+def asymmetric_selections(buckets, flow, size) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """多头端选高持仓流，空头端选低粘性席位份额。"""
+    long, _ = _halves(flow, buckets.eq(5))
+    _, short = _halves(size, buckets.eq(1))
+    return long, short
+
+
+def _seat_state(symbol, dates, market, partition):
+    tables = member_tables(symbol, dates, top20=True, partition=partition)
+    net, gross, sticky, active = seat_turnover_groups(tables, market)
+    valid = market["oi"].gt(0) & market["volume"].gt(0)
+    sticky_gross = gross.where(sticky).sum(axis=1, min_count=1).where(valid)
+    visible_gross = gross.where(sticky | active).sum(axis=1, min_count=1).where(valid)
+    sticky_net = net.where(sticky).sum(axis=1, min_count=1)
+    return pd.DataFrame({"sticky": sticky_net / sticky_gross, "size": sticky_gross / visible_gross})
+
+
+def _mask_inputs(eligible, sticky, flow, size, *, common_only: bool):
+    mask = eligible.copy()
+    if common_only:
+        mask &= sticky.notna() & flow.notna() & size.notna()
+    return tuple(frame.where(mask) for frame in (sticky, flow, size))
+
+
+def load_inputs(jobs: int, *, partition: str = "research", common_only: bool = True,
+                panel: pd.DataFrame | None = None):
+    """Load factor inputs, optionally retaining each factor's own valid universe."""
+    if partition == "research":
+        start = START
+        panel = D.load_panel() if panel is None else panel
+        C.assert_no_holdout_dates(panel["date"], "持仓互补研究日面板")
+    elif partition == "oos":
+        start = pd.Timestamp(C.OOS_START)
+        panel = D.load_evaluation_panel() if panel is None else panel
+        C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "持仓互补样本外日面板")
+    else:
+        raise ValueError(f"未知分区 {partition}")
+    panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
+    panel = panel.assign(eligible=D.eligibility(panel))
+
+    def wide(name):
+        return panel.pivot(index="date", columns="symbol", values=name)
+
+    eligible = wide("eligible").eq(True)
+    root = C.daily_dir(partition) / "member_rank"
+    if partition == "research":
+        C.assert_research_only(root)
+    names = [s for s in eligible.columns[eligible.loc[start:].any()] if (root / f"{s}_long.pkl").is_file()]
+    eligible = eligible[names]
+    volume, oi = wide("volume_total"), wide("oi_total")
+    states = Parallel(n_jobs=jobs, prefer="threads")(
+        delayed(_seat_state)(s, eligible.index, pd.DataFrame({"volume": volume[s], "oi": oi[s]}), partition)
+        for s in names
+    )
+    states = pd.concat(states, axis=1, keys=names).swaplevel(axis=1)
+    sticky, size = states["sticky"], states["size"]
+    if partition == "research":
+        daily_flow = load_daily_flow(eligible, oi)
+    else:
+        daily_flow = load_oos_daily_flow(eligible, oi, start, jobs)
+    flow = daily_flow.rolling(5, min_periods=5).mean()
+    masked = _mask_inputs(eligible, sticky, flow, size, common_only=common_only)
+    return (*(factor.loc[start:] for factor in masked),
+            wide("c1_contract")[names])
+
+
+def run(out: Path, jobs: int) -> pd.DataFrame:
+    sticky, flow, size, contracts = load_inputs(jobs)
+    bars = D.load_contracts("research")
+    returns = return_matrix(contracts, bars.set_index(["contract", "date"])["open"])
+    labels = forward_returns(returns, HOLD).reindex_like(sticky)
+    daily = daily_contrasts(sticky_quintiles(sticky), flow, size, labels)
+    per_day = sticky.notna().sum(axis=1)
+    coverage = per_day.where(per_day.ge(MIN_NAMES))
+
+    rows = []
+    for name, values in daily.items():
+        t = hac_t(values, 20)
+        rows.append(dict(
+            contrast=name, family="primary" if name in PRIMARY else "diagnostic",
+            spread_bp=values.mean() * 1e4, hac_t=t, p=erfc(abs(t) / sqrt(2)),
+            early_bp=values.loc[:"2018"].mean() * 1e4, late_bp=values.loc["2019":].mean() * 1e4,
+            days=values.count(), avg_names=coverage.where(values.notna()).mean(),
+        ))
+    result = pd.DataFrame(rows)
+    result["q"] = result.groupby("family")["p"].transform(_bh)
+    out.mkdir(parents=True, exist_ok=True)
+    result.to_csv(out / "conditional_tests.csv", index=False)
+    daily.rename_axis(index="date").to_csv(out / "daily_contrasts.csv")
+    return result

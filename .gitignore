@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+.mypy_cache/
+.ruff_cache/
+
+.env
+.env.*
+config/rqdata.env
+*.pem
+*.key
+
+# 原始行情、中间面板与研究运行产物留在本地
+/data/
+/runs/
+/docs/*.pdf
+/docs/*_text.txt
+.DS_Store
+.vscode/
+*.zip

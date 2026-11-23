@@ -134,5 +134,5 @@ def study_dir(name: str) -> Path:
 
 
 def strategy_dir(name: str) -> Path:
-    """策略回测输出：runs/strategies/<名称>/{research,oos,combined}/。"""
+    """策略类别输出：runs/strategies/<类别>/，下设各策略目录与 comparison/。"""
     return RUNS_DIR / "strategies" / name

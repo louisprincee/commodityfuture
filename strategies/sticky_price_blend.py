@@ -29,11 +29,11 @@ def daily_target_weights(sticky, flow, size, basis, neg_skew) -> pd.DataFrame:
 
 
 def build_targets(panel: pd.DataFrame, _bars: pd.DataFrame, start: pd.Timestamp,
-                  partition: str, jobs: int) -> Targets:
+                  partition: str, jobs: int, *, horizon: int = HORIZON) -> Targets:
     """构造以共同候选池净额合并的日频权重。"""
     sticky, flow, size, dominant = load_inputs(jobs, partition=partition, common_only=False, panel=panel)
     columns = sticky.columns.sort_values()
     sticky, flow, size = (frame.reindex(columns=columns) for frame in (sticky, flow, size))
     basis, neg_skew = load_price_factors(sticky.index, columns, partition=partition, panel=panel)
     fresh = daily_target_weights(sticky, flow, size, basis, neg_skew)
-    return Targets(hold_cohorts(fresh, horizon=HORIZON).loc[start:], dominant)
+    return Targets(hold_cohorts(fresh, horizon=horizon).loc[start:], dominant)

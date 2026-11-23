@@ -37,9 +37,10 @@ MAIN_BOOK = "STICKY_CORE_2X"
 EQUITY_CURVE_FILE = "equity_curves_d0_t1.csv"
 
 
-def composite_score(factors: dict[str, pd.DataFrame], candidates: pd.DataFrame) -> pd.DataFrame:
+def composite_score(factors: dict[str, pd.DataFrame], candidates: pd.DataFrame,
+                    names: tuple[str, ...] = FACTORS) -> pd.DataFrame:
     """仅在候选池内对固定因子分别做截面百分位秩，再等权平均。"""
-    ranked = [factors[name].where(candidates).rank(axis=1, pct=True) for name in FACTORS]
+    ranked = [factors[name].where(candidates).rank(axis=1, pct=True) for name in names]
     return pd.concat(ranked).groupby(level=0).mean().where(candidates)
 
 
@@ -86,8 +87,9 @@ def selection_summary(score: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_targets(panel: pd.DataFrame, bars: pd.DataFrame, start: pd.Timestamp,
-                  partition: str, jobs: int) -> Targets:
-    """构造策略和流动性池基准的日频权重。"""
+                  partition: str, jobs: int, *, horizon: int = HORIZON,
+                  score_factors: tuple[str, ...] = FACTORS) -> Targets:
+    """构造策略和流动性池基准的日频权重。候选池始终要求 3 个因子都有效，score_factors 只决定打分。"""
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(
         ["date", "symbol"], kind="mergesort",
     )
@@ -122,10 +124,10 @@ def build_targets(panel: pd.DataFrame, bars: pd.DataFrame, start: pd.Timestamp,
     for frame in factors.values():
         candidates &= frame.notna()
 
-    score = composite_score(factors, candidates)
+    score = composite_score(factors, candidates, score_factors)
     fresh = tail_weights(score)
     fresh.loc[fresh.index < start] = 0.0
-    held = hold_cohorts(fresh).loc[start:]
+    held = hold_cohorts(fresh, horizon=horizon).loc[start:]
 
     eligible = eligible.loc[start:]
     benchmark = eligible.astype(float).div(eligible.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)

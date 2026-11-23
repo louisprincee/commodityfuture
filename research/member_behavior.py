@@ -1,41 +1,6 @@
-"""粘性净多的第 2 组持仓补充：逆势加仓、跨品种一致性、榜单成员稳定性。研究期截面检验。
+"""跨品种一致性净多及其相对普通粘性净多的残差。"""
 
-规格在读取任何结果前固定（2026-11-23），只用 2016-01-04 至 2021-12-31，2010–2015 只做滚动窗口预热。
-粘性席位的判定与 STICKY_NET_SHARE 相同（品种榜前 20 名，会员换手低于市场换手）。
-
-CONTRA_FLOW_20（方向 +）
-  粘性席位当日披露的净持仓变化 f_t = Σ_{j∈粘性} (ΔL_j − ΔS_j)，只上一边榜时另一边记 0，
-  用粘性组可见总持仓 G_t 归一化。只计与当日主力收盘收益 r_t 反向的那部分：
-  c_t = (f_t / G_t) · 1[f_t · r_t < 0]，同向或任一为 0 时 c_t = 0。
-  因子为最近 20 个交易日 c_t 之和，至少 15 个有效日。
-  假说：粘性资金在下跌时加多、上涨时加空，是在承接流动性，之后价格向它们的方向回归。
-
-CHAIN_CONSISTENT_NET（方向 +）
-  产业链即 config 中事先定义的板块。会员 j 在品种 s 上的粘性净头寸按品种单边总持仓归一化，
-  n_{j,s} = (L − S)_{j,s} / OI_s，只在 j 是 s 上的粘性席位时有值。
-  j 在板块内除 s 以外品种上的方向 d_{j,−s} = sign(Σ_{s'≠s} n_{j,s'})，要求 j 当日至少还在 1 个
-  同板块品种上是粘性席位。sign(n_{j,s}) = d_{j,−s} ≠ 0 的会员算作方向一致。
-  因子为品种 s 上方向一致的粘性席位的可见净多占比。板块品种不限于流动性池。
-  假说：在整条产业链上同向持仓的低换手席位，更可能是基于产业判断。
-
-BOARD_STABILITY_20（条件变量，不单独定方向）
-  品种当日多头榜或空头榜上的会员集合，与 20 个交易日前集合的 Jaccard 重合度，两日都要有榜单。
-  条件检验：每天在粘性净多、稳定性、标签都有效且至少 16 个品种时，按稳定性截面排序分为高、低两半，
-  奇数时去掉中间一个，同分按品种代码顺序。分别算两半内粘性净多与标签的 Spearman IC，
-  检验 IC_高 − IC_低 > 0 的假说：榜单稳定的品种上，粘性净多更有信息。
-  稳定性自身的 IC 只作描述，不进任何检验族。
-
-检验
-  品种池为流动性池；标签为信号日后 5、10、20 日主力开盘到开盘复利收益；每天至少 8 个品种。
-  Newey–West 滞后 max(20, 2h)，双侧 p。
-  主检验族（BH）：CONTRA_FLOW_20 与 CHAIN_CONSISTENT_NET 的 10 日 IC，及稳定性条件差的 10 日结果，共 3 项。
-  全规格族（BH）：上述 3 项各在 5、10、20 日，共 9 项。
-  增量族（BH）：2 个因子对粘性净多截面秩回归后的残差 10 日 IC，共 2 项。
-"""
 from __future__ import annotations
-
-from math import erfc, sqrt
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -44,39 +9,13 @@ from joblib import Parallel, delayed
 import config as C
 import data as D
 from research.factors import member_tables, seat_turnover_groups
-from research.ic_study import _bh, _rank_corr, forward_returns, return_matrix
-from research.member_extensions import _ic_row, masked_net_share, residual_scores
-from research.xs_robustness import MIN_NAMES, START, hac_t
-
-END = pd.Timestamp(C.RESEARCH_END)
-FACTORS = ("CONTRA_FLOW_20", "CHAIN_CONSISTENT_NET")
-CONDITION = "BOARD_STABILITY_20"
-HORIZONS = (5, 10, 20)
-PRIMARY_HORIZON = 10
-CONTRA_WINDOW = 20
-CONTRA_MIN_DAYS = 15
-STABILITY_LAG = 20
-HALF_MIN_NAMES = 8
+from research.xs_robustness import MIN_NAMES, START
 
 
-# ---------------------------------------------------------------- 因子构造
-
-def sticky_flow(tables: dict[str, pd.DataFrame], sticky: pd.DataFrame) -> pd.Series:
-    """粘性席位披露的净持仓变化之和；没有可用变化时为缺失。"""
-    on_long, on_short = tables["L"].notna(), tables["S"].notna()
-    d_long = tables["dL"].where(on_long, 0.0)
-    d_short = tables["dS"].where(on_short, 0.0)
-    change = (d_long - d_short).where(sticky & d_long.notna() & d_short.notna())
-    return change.sum(axis=1, min_count=1)
-
-
-def contra_flow(flow: pd.Series, gross: pd.Series, ret: pd.Series,
-                window: int = CONTRA_WINDOW, min_days: int = CONTRA_MIN_DAYS) -> pd.Series:
-    scaled = flow / gross.where(gross.gt(0))
-    valid = scaled.notna() & ret.notna()
-    against = (scaled * ret).lt(0)
-    daily = scaled.where(against, 0.0).where(valid)
-    return daily.rolling(window, min_periods=min_days).sum()
+def masked_net_share(net: pd.DataFrame, gross: pd.DataFrame, mask: pd.DataFrame) -> pd.Series:
+    num = net.where(mask).sum(axis=1, min_count=1)
+    den = gross.where(mask).sum(axis=1, min_count=1)
+    return num / den.where(den.gt(0))
 
 
 def chain_consistent_share(net: dict[str, pd.DataFrame], gross: dict[str, pd.DataFrame],
@@ -105,144 +44,75 @@ def chain_consistent_share(net: dict[str, pd.DataFrame], gross: dict[str, pd.Dat
     return out
 
 
-def board_stability(tables: dict[str, pd.DataFrame], lag: int = STABILITY_LAG) -> pd.Series:
-    """当日多空榜会员集合与 lag 个交易日前集合的 Jaccard 重合度。"""
-    on_board = (tables["L"].notna() | tables["S"].notna()) & tables["ranked"].to_numpy(dtype=bool)[:, None]
-    past = on_board.shift(lag, fill_value=False)
-    inter = (on_board & past).sum(axis=1)
-    union = (on_board | past).sum(axis=1)
-    both = tables["ranked"] & tables["ranked"].shift(lag, fill_value=False)
-    return (inter / union.where(union.gt(0))).where(both)
+def residual_scores(score: pd.DataFrame, control: pd.DataFrame) -> pd.DataFrame:
+    """同一批品种上，因子截面秩对控制变量截面秩回归后的残差。"""
+    common = score.notna() & control.notna()
+    x = score.where(common).rank(axis=1, pct=True)
+    z = control.where(common).rank(axis=1, pct=True)
+    x = x.sub(x.mean(axis=1), axis=0)
+    z = z.sub(z.mean(axis=1), axis=0)
+    beta = (x * z).sum(axis=1) / z.pow(2).sum(axis=1).where(lambda value: value.gt(0))
+    return x.sub(z.mul(beta, axis=0)).where(common.sum(axis=1).ge(MIN_NAMES), axis=0)
 
 
-def split_halves(condition: pd.DataFrame, valid: pd.DataFrame,
-                 min_half: int = HALF_MIN_NAMES) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """按条件变量的截面排序分出高、低两半；奇数时去掉中间一个。"""
-    score = condition.where(valid)
-    n = score.notna().sum(axis=1)
-    half = (n // 2).where(n.ge(2 * min_half))
-    rank = score.rank(axis=1, method="first")
-    low = rank.le(half, axis=0)
-    high = rank.gt(n - half, axis=0)
-    return high, low
+# ---------------------------------------------------------------- 分区输入
 
 
-def conditional_ic_gap(sticky: pd.DataFrame, condition: pd.DataFrame,
-                       label: pd.DataFrame) -> pd.DataFrame:
-    valid = sticky.notna() & condition.notna() & label.notna()
-    high, low = split_halves(condition, valid)
-    ic_high, _ = _rank_corr(sticky.where(high), label.where(high), HALF_MIN_NAMES)
-    ic_low, _ = _rank_corr(sticky.where(low), label.where(low), HALF_MIN_NAMES)
-    return pd.DataFrame({"high": ic_high, "low": ic_low, "gap": ic_high - ic_low})
-
-
-# ---------------------------------------------------------------- 研究期输入
-
-def _symbol_state(symbol: str, dates: pd.DatetimeIndex, market: pd.DataFrame) -> dict:
-    tables = member_tables(symbol, dates, top20=True, partition="research")
+def _symbol_state(symbol: str, dates: pd.DatetimeIndex, market: pd.DataFrame, partition: str):
+    tables = member_tables(symbol, dates, top20=True, partition=partition)
     net, gross, sticky, _ = seat_turnover_groups(tables, market)
-    sticky_gross = gross.where(sticky).sum(axis=1, min_count=1)
-    return {
-        "net": net, "gross": gross, "sticky": sticky,
-        "STICKY_NET_SHARE": masked_net_share(net, gross, sticky),
-        "CONTRA_FLOW_20": contra_flow(sticky_flow(tables, sticky), sticky_gross, market["ret"]),
-        CONDITION: board_stability(tables),
-    }
+    return net, gross, sticky
 
 
-def load_inputs(jobs: int):
-    panel = D.load_panel()
-    C.assert_no_holdout_dates(panel["date"], "持仓行为因子日面板")
+def load_chain_inputs(panel: pd.DataFrame, jobs: int, *, partition: str = "research"
+                      ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """从同一份席位持仓计算普通粘性净多和一致性净多，并返回主力合约映射。"""
+    if partition == "research":
+        start = START
+        C.assert_no_holdout_dates(panel["date"], "跨品种一致性日面板")
+    elif partition == "oos":
+        start = pd.Timestamp(C.OOS_START)
+        C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "跨品种一致性样本外日面板")
+    else:
+        raise ValueError(f"未知分区 {partition}")
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
     panel = panel.assign(eligible=D.eligibility(panel))
 
-    def wide(name):
+    def wide(name: str) -> pd.DataFrame:
         return panel.pivot(index="date", columns="symbol", values=name)
 
-    root = C.daily_dir("research") / "member_rank"
-    C.assert_research_only(root)
+    root = C.daily_dir(partition) / "member_rank"
+    if partition == "research":
+        C.assert_research_only(root)
     eligible = wide("eligible").eq(True)
-    ranked = [s for s in eligible.columns if (root / f"{s}_long.pkl").is_file()]
+    ranked = [symbol for symbol in eligible if (root / f"{symbol}_long.pkl").is_file()]
     dates = eligible.index
-    volume, oi, ret = wide("volume_total"), wide("oi_total"), wide("ret1")
+    volume, oi = wide("volume_total"), wide("oi_total")
     states = Parallel(n_jobs=jobs, prefer="threads")(
-        delayed(_symbol_state)(s, dates, pd.DataFrame({"volume": volume[s], "oi": oi[s], "ret": ret[s]}))
-        for s in ranked
+        delayed(_symbol_state)(symbol, dates, pd.DataFrame({"volume": volume[symbol], "oi": oi[symbol]}), partition)
+        for symbol in ranked
     )
-    states = dict(zip(ranked, states))
+    net, gross, sticky = (
+        {symbol: state[i] for symbol, state in zip(ranked, states)} for i in range(3)
+    )
 
-    sectors = panel.drop_duplicates("symbol").set_index("symbol")["sector"]
+    sectors = panel.drop_duplicates("symbol").set_index("symbol")["sector"].loc[ranked]
     chain = {}
-    for sector, group in sectors.loc[ranked].groupby(sectors.loc[ranked]):
-        names = sorted(group.index)
-        chain.update(chain_consistent_share(
-            {s: states[s]["net"] for s in names}, {s: states[s]["gross"] for s in names},
-            {s: states[s]["sticky"] for s in names}, oi, names,
-        ))
-
-    symbols = [s for s in ranked if eligible.loc[START:, s].any()]
+    for _, group in sectors.groupby(sectors):
+        chain.update(chain_consistent_share(net, gross, sticky, oi, sorted(group.index)))
+    symbols = [symbol for symbol in ranked if eligible.loc[start:, symbol].any()]
     eligible = eligible[symbols]
-    factors = {"CHAIN_CONSISTENT_NET": pd.DataFrame({s: chain[s] for s in symbols})}
-    for name in ("STICKY_NET_SHARE", "CONTRA_FLOW_20", CONDITION):
-        factors[name] = pd.DataFrame({s: states[s][name] for s in symbols})
-    factors = {
-        name: frame.reindex(index=dates, columns=symbols).replace([np.inf, -np.inf], np.nan)
-        .where(eligible).loc[START:END]
-        for name, frame in factors.items()
-    }
-    bars = D.load_contracts("research")
-    returns = return_matrix(wide("c1_contract")[symbols], bars.set_index(["contract", "date"])["open"])
-    labels = {h: forward_returns(returns, h).loc[START:END] for h in HORIZONS}
-    return factors, labels
+    valid = eligible & oi[symbols].gt(0) & volume[symbols].gt(0)
+    net_share = pd.DataFrame({
+        symbol: masked_net_share(net[symbol], gross[symbol], sticky[symbol]) for symbol in symbols
+    }, index=dates)
+    chain_share = pd.DataFrame({symbol: chain[symbol] for symbol in symbols}, index=dates)
+    return (net_share.where(valid).loc[start:],
+            chain_share.replace([np.inf, -np.inf], np.nan).where(eligible).loc[start:],
+            wide("c1_contract")[symbols])
 
 
-# ---------------------------------------------------------------- 检验
-
-def _gap_row(gap: pd.DataFrame, horizon: int) -> dict:
-    lags = max(20, 2 * horizon)
-    t = hac_t(gap["gap"], lags)
-    early, late = gap["gap"].loc[:"2018"], gap["gap"].loc["2019":]
-    return dict(
-        mean_ic=gap["gap"].mean(), hac_t=t, p=erfc(abs(t) / sqrt(2)) if np.isfinite(t) else np.nan,
-        days=int(gap["gap"].count()), ic_high=gap["high"].mean(), ic_low=gap["low"].mean(),
-        ic_2016_2018=early.mean(), t_2016_2018=hac_t(early, lags),
-        ic_2019_2021=late.mean(), t_2019_2021=hac_t(late, lags),
-    )
-
-
-def evaluate(factors: dict[str, pd.DataFrame], labels: dict[int, pd.DataFrame]) -> pd.DataFrame:
-    sticky = factors["STICKY_NET_SHARE"]
-    rows = []
-    for name in (*FACTORS, CONDITION, "STICKY_NET_SHARE"):
-        score = factors[name]
-        corr, _ = _rank_corr(score, sticky, MIN_NAMES)
-        for horizon in HORIZONS:
-            rows.append(dict(test="ic", factor=name, horizon=horizon, corr_with_sticky=corr.mean(),
-                             **_ic_row(score, labels[horizon], horizon)))
-    for horizon in HORIZONS:
-        gap = conditional_ic_gap(sticky, factors[CONDITION], labels[horizon])
-        rows.append(dict(test="condition_gap", factor=CONDITION, horizon=horizon, **_gap_row(gap, horizon)))
-    for name in FACTORS:
-        residual = residual_scores(factors[name], sticky)
-        rows.append(dict(test="residual", factor=name, horizon=PRIMARY_HORIZON,
-                         **_ic_row(residual, labels[PRIMARY_HORIZON], PRIMARY_HORIZON)))
-    result = pd.DataFrame(rows)
-    tested = (result["test"].eq("ic") & result["factor"].isin(FACTORS)) | result["test"].eq("condition_gap")
-    families = {
-        "q_primary": tested & result["horizon"].eq(PRIMARY_HORIZON),
-        "q_full": tested,
-        "q_increment": result["test"].eq("residual"),
-    }
-    for column, members in families.items():
-        result[column] = _bh(result["p"].where(members))
-    return result
-
-
-def run(out: Path, jobs: int) -> pd.DataFrame:
-    factors, labels = load_inputs(jobs)
-    result = evaluate(factors, labels)
-    out.mkdir(parents=True, exist_ok=True)
-    result.to_csv(out / "factor_ic.csv", index=False)
-    pd.DataFrame({name: frame.notna().sum(axis=1) for name, frame in factors.items()}).describe().to_csv(
-        out / "coverage.csv")
-    return result
+def load_chain_scores(panel: pd.DataFrame, jobs: int, *, partition: str = "research") -> pd.DataFrame:
+    """返回跨品种一致性净多，供因子研究使用。"""
+    _, chain, _ = load_chain_inputs(panel, jobs, partition=partition)
+    return chain

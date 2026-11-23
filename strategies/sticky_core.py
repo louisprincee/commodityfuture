@@ -8,7 +8,7 @@
   合成   在当日流动性池且三因子均有效的品种内分别计算百分位秩，等权平均。
   选样   有效候选至少 8 个品种时，取合成得分前 20% 做多、后 20% 做空，不设拥挤度硬门槛否决。
   持有   每日新鲜多空各分配 0.50 名义权重，经 10 个交易日重叠持有形成当期组合，次日开盘成交。
-  对照   LONG_ONLY_BMK；当前唯一策略组合为 2X（上限 20%）。
+  对照   LONG_ONLY_BMK；下单前目标权重乘数 2，单品种目标上限 20%。
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ SKEW_WINDOW = 242
 SKEW_MIN_PERIODS = 200
 TARGET_MULTIPLIER = 2.0
 NAME_CAP = 0.20
-MAIN_BOOK = "STICKY_CORE_2X"
+MAIN_BOOK = "STICKY_CORE"
 EQUITY_CURVE_FILE = "equity_curves_d0_t1.csv"
 
 

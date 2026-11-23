@@ -26,7 +26,7 @@ import config as C  # noqa: E402
 import data as D  # noqa: E402
 from costs import load_market  # noqa: E402
 from research.settings import XS_POSITION  # noqa: E402
-from strategies import price_core, sticky_core, sticky_only, sticky_price_blend, sticky_split  # noqa: E402
+from strategies import price_core, sticky_chain, sticky_core, sticky_only, sticky_price_blend  # noqa: E402
 
 CAPITAL_CNY = 10_000_000
 BENCHMARK_BOOK = "LONG_ONLY_BMK"
@@ -575,7 +575,7 @@ def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str
 #   runs/strategies/<类别>/comparison/{research,oos,2016-2025}/
 # 持有期另设的规格是新书，写到同级的 <策略>_hold<N>/ 与 comparison_hold<N>/，不覆盖现行结果。
 FAMILIES = {
-    "member": (sticky_only, sticky_split),
+    "member": (sticky_only, sticky_chain),
     "member_price": (sticky_core, sticky_price_blend),
 }
 FAMILY_TITLES = {
@@ -600,12 +600,11 @@ def _variant(name: str, horizon: int | None) -> int | None:
 
 def book_label(name: str, horizon: int | None = None) -> str:
     module, horizon = MODULES[name], _variant(name, horizon)
-    if horizon is None:
-        return module.MAIN_BOOK
-    default = f"_{module.HORIZON}D_"
-    if default in module.MAIN_BOOK:
-        return module.MAIN_BOOK.replace(default, f"_{horizon}D_")
-    return module.MAIN_BOOK.replace("_2X", f"_{horizon}D_2X")
+    return _module_book_label(module, horizon or module.HORIZON)
+
+
+def _module_book_label(module, horizon: int) -> str:
+    return module.MAIN_BOOK if horizon == module.HORIZON else f"{module.MAIN_BOOK}_{horizon}D"
 
 
 def book_dir(name: str, horizon: int | None = None) -> Path:
@@ -634,7 +633,7 @@ def _run_partition(module, partition: str, base_out: Path, jobs: int, horizon: i
     check_dates(fees["trading_date"], "历史手续费")
     bars = D.load_contracts_span(partition)
     horizon = horizon or module.HORIZON
-    book = book_label(module.STRATEGY_ID, horizon)
+    book = _module_book_label(module, horizon)
     targets = module.build_targets(panel, bars, start, partition, jobs, horizon=horizon)
     contracts = targets.dominant.shift(1).reindex_like(targets.weights)
     check_dates(contracts.index, "策略净值交易日")
@@ -684,11 +683,15 @@ def _evaluate_partition(selected: list[str], partition: str, jobs: int, *, reuse
         name, variant = key
         module, base_out, book = MODULES[name], book_dir(name, variant), book_label(name, variant)
         path = base_out / partition / module.EQUITY_CURVE_FILE
-        if not path.is_file() or (not reuse and key in wanted):
+        columns = [book, BENCHMARK_BOOK] if key == (BENCHMARK_SOURCE, None) else [book]
+        cached = None
+        if path.is_file() and (reuse or key not in wanted):
+            cached = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+        if cached is None or not set(columns).issubset(cached.columns):
             _run_partition(module, partition, base_out, jobs, variant)
             plotted.add(key)
-        columns = [book, BENCHMARK_BOOK] if key == (BENCHMARK_SOURCE, None) else [book]
-        frame = _chart_frame(pd.read_csv(path, parse_dates=["date"]).set_index("date"), columns)
+            cached = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+        frame = _chart_frame(cached, columns)
         check_dates = C.assert_oos_dates if partition == "oos" else C.assert_no_holdout_dates
         check_dates(frame.index, f"{name} {partition} 净值")
         frames[key] = frame

@@ -438,3 +438,33 @@ def test_sticky_net_share_separates_sticky_and_one_sided_seats_from_high_turnove
     assert out.loc[days[0], "SPEC_NET_SHARE"] == pytest.approx(10.0 / 30.0)
     assert np.isnan(out.loc[days[1], "STICKY_NET_SHARE"])
     assert np.isnan(out.loc[days[1], "SPEC_NET_SHARE"])
+
+
+def test_residual_scores_remove_the_rank_component_of_the_control():
+    from research.member_behavior import residual_scores
+
+    day = pd.DatetimeIndex(["2020-01-02"])
+    cols = list("abcdefgh")
+    control = pd.DataFrame([np.arange(8.0)], index=day, columns=cols)
+    residual = residual_scores(control * 2, control)
+    assert np.allclose(residual.to_numpy(), 0.0)
+
+
+def test_chain_share_uses_only_sticky_members_with_same_direction_on_another_product():
+    from research.member_behavior import chain_consistent_share
+
+    day = pd.DatetimeIndex(["2020-01-02"])
+    seats = ["same", "opposite", "only_a"]
+    net = {
+        "A": pd.DataFrame([[6., -4., 2.]], index=day, columns=seats),
+        "B": pd.DataFrame([[2., 5., 0.]], index=day, columns=seats),
+    }
+    gross = {
+        "A": pd.DataFrame([[10., 10., 10.]], index=day, columns=seats),
+        "B": pd.DataFrame([[10., 10., 0.]], index=day, columns=seats),
+    }
+    sticky = {symbol: holdings.gt(0) for symbol, holdings in gross.items()}
+    oi = pd.DataFrame({"A": [100.], "B": [200.]}, index=day)
+    result = chain_consistent_share(net, gross, sticky, oi, ["A", "B"])
+    assert result["A"].iloc[0] == pytest.approx(0.6)
+    assert result["B"].iloc[0] == pytest.approx(0.2)

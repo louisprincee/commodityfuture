@@ -1,4 +1,4 @@
-"""研究对照：只用粘性席位净多排名，两端各 20% 等权多空，10 日重叠持有。"""
+"""会员持仓主策略：只用粘性席位净多排名，两端各 20% 等权多空，10 日重叠持有。"""
 import pandas as pd
 
 from research.member_complementarity import load_inputs
@@ -6,7 +6,7 @@ from strategies import Targets
 from strategies.sticky_core import hold_cohorts, tail_weights
 
 STRATEGY_ID = "sticky_only"
-MAIN_BOOK = "STICKY_ONLY_10D_2X"
+MAIN_BOOK = "STICKY_ONLY"
 EQUITY_CURVE_FILE = "equity_curves.csv"
 HORIZON = 10
 TARGET_MULTIPLIER = 2.0

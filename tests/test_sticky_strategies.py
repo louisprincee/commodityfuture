@@ -15,16 +15,52 @@ def _save_equity(base, partition, module, columns):
 
 
 def test_blend_nets_opposing_sleeves_without_restoring_target_gross():
-    from strategies.sticky_price_blend import daily_target_weights as blend
+    from strategies.sticky_price_blend import blend_weights
 
     names = list(range(20))
     sticky = pd.DataFrame([names], columns=names)
-    weights = blend(sticky, sticky, sticky, -sticky, -sticky)
+    weights = blend_weights(sticky, sticky, sticky, -sticky, -sticky, sticky.notna())
 
     assert weights.iloc[0].sum() == pytest.approx(0)
     assert weights.iloc[0].abs().sum() == pytest.approx(0.5)
     assert weights.loc[0, 18] == pytest.approx(.0625)
     assert weights.loc[0, 0] == pytest.approx(-.0625)
+
+
+@pytest.mark.parametrize("invalid_factor", ["chain", "basis", "neg_skew"])
+def test_price_blend_requires_only_its_signals_and_rechecks_pool_size(invalid_factor):
+    from strategies.sticky_price_blend import daily_target_weights
+
+    names = list(range(20))
+    sticky = pd.DataFrame([names, names], dtype=float)
+    chain = pd.DataFrame([[10, 9, 0, 1, *range(4, 9), 2, 3, *range(11, 16), 18, 19, 16, 17]] * 2, dtype=float)
+    factors = dict(basis=sticky.copy(), neg_skew=sticky.copy(), chain=chain)
+    factors[invalid_factor].loc[1, 0] = np.nan
+    weights = daily_target_weights(sticky, **factors)
+
+    assert weights.loc[0, 16] == pytest.approx(.1875)
+    assert weights.loc[0, 17] == pytest.approx(.1875)
+    assert weights.loc[0, 2] == pytest.approx(-.1875)
+    assert weights.loc[0, 3] == pytest.approx(-.1875)
+    assert weights.loc[1].eq(0).all()
+
+
+def test_sticky_chain_targets_only_need_net_share_and_chain_score(monkeypatch):
+    from strategies import sticky_chain
+
+    names = list(range(20))
+    dates = pd.date_range("2016-01-04", periods=2)
+    sticky = pd.DataFrame([names, names], index=dates, dtype=float)
+    chain = -sticky.pow(2)
+    chain.iloc[1, 0] = np.nan
+    dominant = pd.DataFrame("contract", index=dates, columns=names)
+    monkeypatch.setattr(sticky_chain, "load_chain_inputs", lambda *args, **kwargs: (sticky, chain, dominant))
+
+    targets = sticky_chain.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "research", 1, horizon=1)
+
+    assert targets.weights.iloc[0].abs().sum() == pytest.approx(1)
+    assert targets.weights.iloc[1].eq(0).all()
+    assert targets.dominant is dominant
 
 
 @pytest.mark.parametrize("partition,loader,fee,root", [
@@ -67,7 +103,7 @@ def test_single_engine_routes_blend_to_the_requested_partition(monkeypatch, tmp_
     assert calls == [(bars, tuple(dates), {"A2201"}, start, tmp_path / partition / "contracts", 0.20, partition)]
 
 
-def test_combined_creates_missing_book_and_plots_both_strategies_with_one_benchmark(monkeypatch, tmp_path):
+def test_combined_replaces_old_blend_and_plots_both_strategies_with_one_benchmark(monkeypatch, tmp_path):
     from matplotlib.figure import Figure
 
     from backtest import engine as E
@@ -76,6 +112,7 @@ def test_combined_creates_missing_book_and_plots_both_strategies_with_one_benchm
     for partition in ("research", "oos"):
         _save_equity(tmp_path, partition, core, {core.MAIN_BOOK: [1e7, 1.1e7], E.BENCHMARK_BOOK: [1e7, 1.05e7]})
     _save_equity(tmp_path, "research", blend, {blend.MAIN_BOOK: [1e7, 1.2e7]})
+    _save_equity(tmp_path, "oos", blend, {"STICKY_PRICE_BLEND_SPLIT": [1e7, 1.4e7]})
     monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
     monkeypatch.setattr(E.D, "load_evaluation_panel", lambda: pd.DataFrame())
     calls = []
@@ -118,11 +155,11 @@ def test_member_family_runs_oos_and_mirrors_the_price_family_layout(monkeypatch,
     from matplotlib.figure import Figure
 
     from backtest import engine as E
-    from strategies import sticky_core as core, sticky_only as only, sticky_split as split
+    from strategies import sticky_core as core, sticky_only as only, sticky_chain as chain
 
     for partition in ("research", "oos"):
         _save_equity(tmp_path, partition, core, {core.MAIN_BOOK: [1e7, 1.1e7], E.BENCHMARK_BOOK: [1e7, 1.05e7]})
-    for module in (only, split):
+    for module in (only, chain):
         _save_equity(tmp_path, "research", module, {module.MAIN_BOOK: [1e7, 1.2e7]})
     monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
     calls, titles = [], {}
@@ -140,24 +177,25 @@ def test_member_family_runs_oos_and_mirrors_the_price_family_layout(monkeypatch,
     monkeypatch.setattr(E, "_run_partition", run)
     assert E.main(["--family", "member", "--start", "2016", "--end", "2025"]) == 0
 
-    assert calls == [(only, "oos"), (split, "oos")]
+    assert calls == [(only, "oos"), (chain, "oos")]
+    assert "sticky_split" not in E.MODULES
     family = tmp_path / "member"
-    for module in (only, split):
+    for module in (only, chain):
         for partition in ("research", "oos", "combined"):
             assert (family / module.STRATEGY_ID / partition / "performance.png").is_file()
     for folder in ("research", "oos", "2016-2022"):
         assert (family / "comparison" / folder / "daily_returns.csv").is_file()
     overview = Path("member") / "comparison" / "2016-2022" / "plots" / "overview.png"
-    assert {"会员持仓因子 · 商品期货截面策略", only.MAIN_BOOK, split.MAIN_BOOK} <= set(titles[overview])
+    assert {"会员持仓因子 · 商品期货截面策略", only.MAIN_BOOK, chain.MAIN_BOOK, E.BENCHMARK_LABEL} <= set(titles[overview])
     assert not (tmp_path / "member_price" / "comparison").exists()
 
 
 def test_longer_horizon_is_a_separate_book_beside_the_current_one(monkeypatch, tmp_path):
     from backtest import engine as E
-    from strategies import sticky_core as core, sticky_only as only, sticky_split as split
+    from strategies import sticky_core as core, sticky_only as only, sticky_chain as chain
 
-    assert E.book_label("sticky_only", 20) == "STICKY_ONLY_20D_2X"
-    assert E.book_label("sticky_core", 20) == "STICKY_CORE_20D_2X"
+    assert E.book_label("sticky_only", 20) == "STICKY_ONLY_20D"
+    assert E.book_label("sticky_core", 20) == "STICKY_CORE_20D"
     assert E.book_label("sticky_core", core.HORIZON) == core.MAIN_BOOK
     monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
     _save_equity(tmp_path, "research", core, {core.MAIN_BOOK: [1e7, 1.1e7], E.BENCHMARK_BOOK: [1e7, 1.05e7]})
@@ -174,9 +212,9 @@ def test_longer_horizon_is_a_separate_book_beside_the_current_one(monkeypatch, t
     monkeypatch.setattr(E, "_run_partition", run)
     assert E.main(["--family", "member", "--horizon", "20", "--research"]) == 0
 
-    assert calls == [(only, "research", "sticky_only_hold20", 20), (split, "research", "sticky_split_hold20", 20)]
+    assert calls == [(only, "research", "sticky_only_hold20", 20), (chain, "research", "sticky_chain_hold20", 20)]
     returns = pd.read_csv(tmp_path / "member" / "comparison_hold20" / "research" / "daily_returns.csv")
-    assert returns.columns.tolist() == ["date", "STICKY_ONLY_20D_2X", "STICKY_SPLIT_20D_2X", E.BENCHMARK_BOOK]
+    assert returns.columns.tolist() == ["date", "STICKY_ONLY_20D", chain.MAIN_BOOK + "_20D", E.BENCHMARK_BOOK]
     assert not (tmp_path / "member" / "comparison").exists()
 
 
@@ -207,7 +245,7 @@ def test_sticky_core_keeps_only_two_times_book():
     from strategies.sticky_core import MAIN_BOOK, NAME_CAP, TARGET_MULTIPLIER
 
     assert (TARGET_MULTIPLIER, NAME_CAP) == (2.0, 0.20)
-    assert MAIN_BOOK == "STICKY_CORE_2X"
+    assert MAIN_BOOK == "STICKY_CORE"
 
 
 def test_sticky_core_cohorts_average_daily_cross_sections():

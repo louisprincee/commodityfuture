@@ -8,7 +8,7 @@ import config as C
 import data as D
 
 COMMANDS = ("panel", "member-ic", "paper-ic", "five-day-ic", "candidate-ic", "xs-robustness",
-            "member-smoothing", "member-complementarity", "plot-ic")
+            "member-smoothing", "member-complementarity", "chain-ic", "plot-ic")
 
 
 def main(argv: list[str]) -> int:
@@ -44,6 +44,12 @@ def main(argv: list[str]) -> int:
         out = C.study_dir("member_complementarity")
         result = member_complementarity.run(out, args.jobs)
         print(f"{len(result)} 项持仓条件价差写入 {out}")
+        return 0
+    if cmd == "chain-ic":
+        from research import member_behavior
+        out = C.study_dir("member_behavior")
+        result = member_behavior.run_chain_ic(out, args.jobs)
+        print(result.round(4).to_string(index=False))
         return 0
     from research import ic_study
     panel = D.load_panel()

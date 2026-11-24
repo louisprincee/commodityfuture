@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from math import erfc, sqrt
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
@@ -9,7 +12,8 @@ from joblib import Parallel, delayed
 import config as C
 import data as D
 from research.factors import member_tables, seat_turnover_groups
-from research.xs_robustness import MIN_NAMES, START
+from research.ic_study import _rank_corr, forward_returns, return_matrix
+from research.xs_robustness import MIN_NAMES, START, hac_t
 
 
 def masked_net_share(net: pd.DataFrame, gross: pd.DataFrame, mask: pd.DataFrame) -> pd.Series:
@@ -112,7 +116,20 @@ def load_chain_inputs(panel: pd.DataFrame, jobs: int, *, partition: str = "resea
             wide("c1_contract")[symbols])
 
 
-def load_chain_scores(panel: pd.DataFrame, jobs: int, *, partition: str = "research") -> pd.DataFrame:
-    """返回跨品种一致性净多，供因子研究使用。"""
-    _, chain, _ = load_chain_inputs(panel, jobs, partition=partition)
-    return chain
+def run_chain_ic(out: Path, jobs: int) -> pd.DataFrame:
+    """复现研究期 10 日残差 IC，报告 20 阶 Newey–West 双侧原始 p 值。"""
+    sticky, chain, dominant = load_chain_inputs(D.load_panel(), jobs)
+    bars = D.load_contracts("research")
+    returns = return_matrix(dominant, bars.set_index(["contract", "date"])["open"])
+    labels = forward_returns(returns, 10).reindex_like(sticky)
+    ic, names = _rank_corr(residual_scores(chain, sticky), labels, MIN_NAMES)
+    rows = []
+    for phase, values in (("2016–2021", ic), ("2016–2018", ic.loc[:"2018"]), ("2019–2021", ic.loc["2019":])):
+        t_stat = hac_t(values, 20)
+        rows.append(dict(phase=phase, horizon=10, mean_ic=values.mean(), hac_t=t_stat,
+                         p=erfc(abs(t_stat) / sqrt(2)), days=values.count(),
+                         avg_names=names.reindex(values.index).mean()))
+    result = pd.DataFrame(rows)
+    out.mkdir(parents=True, exist_ok=True)
+    result.to_csv(out / "chain_ic.csv", index=False)
+    return result

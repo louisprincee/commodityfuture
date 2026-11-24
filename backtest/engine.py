@@ -398,12 +398,13 @@ def plot_equity_drawdown(
     oos_sharpe = _period_sharpe(frame.loc[frame.index >= split])
     annualized = nav.pct_change(fill_method=None).mean() * TD
     annual = pd.DataFrame({year: yearly.iloc[-1] - 1 for year, yearly in _calendar_year_nav(frame)}).T
+    divider_y = min(0.752, 0.843 - (len(nav.columns) - 1) * 0.026 - 0.017)
 
     with plt.rc_context(_OVERVIEW_STYLE):
         figure = plt.figure(figsize=(20, 11.5))
         grid = figure.add_gridspec(
             2, 2, height_ratios=(2.8, 1), width_ratios=(2.05, 1),
-            left=0.055, right=0.955, top=0.71, bottom=0.07, hspace=0.19, wspace=0.14,
+            left=0.055, right=0.955, top=min(0.71, divider_y - 0.04), bottom=0.07, hspace=0.19, wspace=0.14,
         )
         nav_axis = figure.add_subplot(grid[0, 0])
         drawdown_axis = figure.add_subplot(grid[1, 0], sharex=nav_axis)
@@ -514,7 +515,7 @@ def plot_equity_drawdown(
                     ha="right", fontsize=10.8, color=colors[column],
                 )
         figure.add_artist(Line2D(
-            [0.055, 0.955], [0.752, 0.752], transform=figure.transFigure,
+            [0.055, 0.955], [divider_y, divider_y], transform=figure.transFigure,
             color="#e2e8ed", linewidth=0.8,
         ))
         if first < split <= last:
@@ -547,7 +548,7 @@ def _write_combined_book(combined: pd.DataFrame, base_out: Path, book: str, *, h
     print(summary.round(4).to_string(index=False))
 
 
-def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str,
+def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str | None,
                                horizon: int | None = None) -> None:
     full_sample = partition == "combined"
     first, last = equity.index[[0, -1]]
@@ -557,10 +558,13 @@ def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str
     daily_returns = equity.div(equity.shift(fill_value=CAPITAL_CNY)) - 1
     daily_returns.to_csv(out / "daily_returns.csv", index_label="date")
     plots = out / "plots"
-    frame = equity.rename(columns={BENCHMARK_BOOK: BENCHMARK_LABEL})
-    title = FAMILY_TITLES[family] + (f" · 持有 {horizon} 日" if horizon else "")
-    _plot_performance(frame / CAPITAL_CNY, plots / "performance.png", title=f"{title} · {first.year}–{last.year}")
-    _plot_yearly_performance(frame, plots, title)
+    title = FAMILY_TITLES[family] if family is not None else "商品期货截面策略总览"
+    if horizon is not None:
+        title += f" · 持有 {horizon} 日"
+    if family is not None:
+        frame = equity.rename(columns={BENCHMARK_BOOK: BENCHMARK_LABEL})
+        _plot_performance(frame / CAPITAL_CNY, plots / "performance.png", title=f"{title} · {first.year}–{last.year}")
+        _plot_yearly_performance(frame, plots, title)
     if full_sample:
         books = equity.columns.drop(BENCHMARK_BOOK).tolist()
         plot_equity_drawdown(equity, plots / "overview.png", strategies=books, benchmark=BENCHMARK_BOOK,
@@ -613,8 +617,8 @@ def book_dir(name: str, horizon: int | None = None) -> Path:
     return C.strategy_dir(FAMILY_OF[name]) / folder
 
 
-def comparison_dir(family: str, horizon: int | None = None) -> Path:
-    return C.strategy_dir(family) / ("comparison" if horizon is None else f"comparison_hold{horizon}")
+def comparison_dir(family: str | None, horizon: int | None = None) -> Path:
+    return C.strategy_dir(family or "") / ("comparison" if horizon is None else f"comparison_hold{horizon}")
 
 
 def _run_partition(module, partition: str, base_out: Path, jobs: int, horizon: int | None = None) -> None:
@@ -706,20 +710,43 @@ def _evaluate_partition(selected: list[str], partition: str, jobs: int, *, reuse
     return equity[[*(book_label(*key) for key in wanted), BENCHMARK_BOOK]]
 
 
-def _run_combined(family: str, jobs: int, horizon: int | None = None) -> None:
+def _run_combined(family: str, selected: list[str], jobs: int,
+                  horizon: int | None = None) -> dict[str, pd.DataFrame]:
     """复用已有分区净值，缺少账本时补跑，再把样本外承接在研究期末净值之后。"""
-    selected = [module.STRATEGY_ID for module in FAMILIES[family]]
     partitions = {}
     for split in C.PARTITIONS:
         equity = _evaluate_partition(selected, split, jobs, reuse=True, horizon=horizon)
-        _write_strategy_comparison(equity, split, family, horizon)
         partitions[split] = equity
     research, oos = partitions["research"], partitions["oos"]
     combined = pd.concat([research, oos.div(oos.iloc[0]).mul(research.iloc[-1])])
     for name in selected:
         _write_combined_book(combined, book_dir(name, horizon), book_label(name, horizon),
                              has_benchmark=(name, _variant(name, horizon)) == (BENCHMARK_SOURCE, None))
-    _write_strategy_comparison(combined, "combined", family, horizon)
+    partitions["combined"] = combined
+    if len(selected) > 1:
+        for split, equity in partitions.items():
+            _write_strategy_comparison(equity, split, family, horizon)
+    return partitions
+
+
+def _write_all_comparison(families: list[dict[str, pd.DataFrame]], horizon: int | None) -> None:
+    rows = []
+    for phase in (*C.PARTITIONS, "combined"):
+        frames = [family[phase] for family in families]
+        benchmark = frames[0][BENCHMARK_BOOK]
+        if any(not frame[BENCHMARK_BOOK].equals(benchmark) for frame in frames[1:]):
+            raise ValueError(f"{phase} 各策略类别的等权基准未对齐")
+        equity = pd.concat([*(frame.drop(columns=BENCHMARK_BOOK) for frame in frames), benchmark], axis=1)
+        if phase == "combined":
+            _write_strategy_comparison(equity, phase, None, horizon)
+        for book, nav in equity.drop(columns=BENCHMARK_BOOK).items():
+            # 单独评价从初始本金起算，完整期沿用合并账本的净值变化率。
+            initial = None if phase == "combined" else CAPITAL_CNY
+            stats = metrics(nav.div(nav.shift(fill_value=initial)) - 1)
+            rows.append(dict(book=book, phase=phase, net_ann=stats["ann_return"], sharpe=stats["sharpe"],
+                             max_drawdown=(nav / nav.cummax().clip(lower=CAPITAL_CNY) - 1).min()))
+    filename = "summary.csv" if horizon is None else f"summary_hold{horizon}.csv"
+    pd.DataFrame(rows).to_csv(C.strategy_dir("") / filename, index=False)
 
 
 def main(argv: list[str]) -> int:
@@ -759,15 +786,21 @@ def main(argv: list[str]) -> int:
         families = [FAMILY_OF[args.strategy]]
     else:
         families = [args.family] if args.family else list(FAMILIES)
+    combined_families = []
     for family in families:
-        if partition == "combined":
-            _run_combined(family, args.jobs, args.horizon)
-            continue
         selected = [args.strategy] if args.strategy else [module.STRATEGY_ID for module in FAMILIES[family]]
-        equity = _evaluate_partition(selected, partition, args.jobs, reuse=False, horizon=args.horizon)
         horizons = {_variant(name, args.horizon) for name in selected}
+        if partition == "combined":
+            horizon = None if horizons == {None} else args.horizon
+            combined_families.append(_run_combined(family, selected, args.jobs, horizon))
+            continue
+        equity = _evaluate_partition(selected, partition, args.jobs, reuse=False, horizon=args.horizon)
         if len(selected) > 1 and len(horizons) == 1:
             _write_strategy_comparison(equity, partition, family, horizons.pop())
+    if len(combined_families) > 1:
+        horizon = None if all(args.horizon in (None, module.HORIZON)
+                              for modules in FAMILIES.values() for module in modules) else args.horizon
+        _write_all_comparison(combined_families, horizon)
     return 0
 
 

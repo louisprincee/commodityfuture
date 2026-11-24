@@ -26,7 +26,7 @@
 
 ### 1.2 时点和检验方法
 
-因子只用交易日 $t$ 收盘前可见的价格和会员排名，收盘形成权重，下一交易日开盘成交。检验用的收益从下一交易日开盘算起，多日收益只在同一合约上复利，换月时新旧合约的价差不算作收益。
+用交易日 $t$ 的价格和该日收盘后公布的会员排名计算权重，下一交易日开盘成交。检验收益从下一交易日开盘算起。每天的开盘到开盘收益用同一合约的价格计算，多日标签将这些日收益复利相乘。
 
 截面 IC 是每天因子排名与未来收益排名的 Spearman 相关，再对交易日取平均，每天至少要有 8 个有效品种。均值的显著性用 Newey–West 标准误，并在事先划定的检验族内做 Benjamini–Hochberg 多重检验校正，下文的 $q$ 就是校正后的值。
 
@@ -138,7 +138,7 @@ $$
 {\sum_{j\in\mathcal{M}_{i,t}}(L_{j,i,t}+S_{j,i,t})}
 $$
 
-**3. 扣掉普通粘性净多已经包含的部分。** 每个交易日取流动性池内两个指标都有值的品种，把普通粘性净多转成百分位排名 $U_{i,t}$，把一致性净多转成百分位排名 $V_{i,t}$，再用当天的截面回归把前者能解释的部分去掉：
+**3. 扣掉普通粘性净多已经包含的部分。** 每天取流动性池内 2 个净多指标都有值的品种。价格组合在回归前还要求基差动量和负向偏度有效，因此它与纯持仓策略的残差排名可能不同。在各自的品种池里，把普通粘性净多转成百分位排名 $U_{i,t}$，把一致性净多转成百分位排名 $V_{i,t}$，再做当天的截面回归：
 
 $$
 V_{i,t}=a_t+b_tU_{i,t}+e_{i,t},
@@ -150,7 +150,7 @@ $a_t$、$b_t$ 是这一天的回归系数，$e_{i,t}$ 是残差。某品种的�
 
 多空方向仍由普通粘性净多划定。残差不单独决定做多或做空，只在已经划出的多头候选和空头候选里再挑选。
 
-10 日残差 IC 在 2016–2018 年为 +0.0313，2019–2021 年为 +0.0308。全期原检验族校正 (q=0.0136)，后半段原始 (p=0.0543)。[前后半段 IC](../runs/research/member_behavior/chain_stability_10d.csv) · [原统计检验](../runs/research/member_behavior/factor_ic.csv)
+10 日残差 IC 在 2016–2018 年为 +0.0313，2019–2021 年为 +0.0308。用 20 阶 Newey–West 标准误计算，全研究期的双侧原始 $p=0.0068$，后半段为 $p=0.0543$。[10 日残差 IC](../runs/research/member_behavior/chain_ic.csv)
 
 ---
 
@@ -224,6 +224,8 @@ $$
 | `STICKY_CHAIN_RESIDUAL`       | +10.88% / 0.99 / −16.42% | +5.66% / 0.57 / −22.36% |  +8.80% / 0.83 / −22.36% |
 | `STICKY_CORE`                 | +12.06% / 1.06 / −18.72% | +8.60% / 0.99 / −12.72% | +10.68% / 1.03 / −18.72% |
 | `STICKY_PRICE_BLEND_RESIDUAL` | +12.89% / 1.38 / −14.11% | +6.85% / 0.98 / −13.43% | +10.49% / 1.23 / −14.11% |
+
+[4 套策略与等权基准同图](../runs/strategies/comparison/2016-2025/plots/overview.png) · [回测汇总 CSV](../runs/strategies/summary.csv)
 
 ![2016–2025 年 2 套价格策略与等权多头基准](../runs/strategies/member_price/comparison/2016-2025/plots/overview.png)
 
@@ -300,8 +302,8 @@ $$
 ```bash
 python -m research member-smoothing --jobs 4
 python -m research member-complementarity --jobs 4
+python -m research chain-ic --jobs 4
 python -m backtest.engine --family member --research
 python -m backtest.engine --family member --oos
-python -m backtest.engine --family member --start 2016 --end 2025
-python -m backtest.engine --family member_price --start 2016 --end 2025
+python -m backtest.engine --start 2016 --end 2025
 ```

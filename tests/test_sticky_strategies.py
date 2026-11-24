@@ -190,6 +190,56 @@ def test_member_family_runs_oos_and_mirrors_the_price_family_layout(monkeypatch,
     assert not (tmp_path / "member_price" / "comparison").exists()
 
 
+def test_combined_single_strategy_leaves_family_outputs_alone(monkeypatch, tmp_path):
+    from backtest import engine as E
+    from strategies import sticky_core as core, sticky_only as only
+
+    monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(E, "_plot_book_figures", lambda *args: None)
+    for period in E.C.PARTITIONS:
+        _save_equity(tmp_path, period, core, {core.MAIN_BOOK: [1e7, 1.1e7], E.BENCHMARK_BOOK: [1e7, 1.05e7]})
+        _save_equity(tmp_path, period, only, {only.MAIN_BOOK: [1e7, 1.2e7]})
+
+    def unexpected_run(*args):
+        pytest.fail("A different strategy was scheduled")
+
+    monkeypatch.setattr(E, "_run_partition", unexpected_run)
+    assert E.main(["sticky_only", "--partition", "combined"]) == 0
+    assert (tmp_path / "member" / "sticky_only" / "combined" / "summary.csv").is_file()
+    assert not (tmp_path / "member" / "comparison").exists()
+
+
+def test_all_books_generate_one_overview_and_summary(monkeypatch, tmp_path):
+    from backtest import engine as E
+
+    monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(E, "_plot_book_figures", lambda *args: None)
+    monkeypatch.setattr(E, "_plot_performance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(E, "_plot_yearly_performance", lambda *args: None)
+    books = []
+    for modules in E.FAMILIES.values():
+        for module in modules:
+            books.append(module.MAIN_BOOK)
+            curves = {module.MAIN_BOOK: [1e7, 1.1e7]}
+            if module.STRATEGY_ID == E.BENCHMARK_SOURCE:
+                curves[E.BENCHMARK_BOOK] = [1e7, 1.05e7]
+            for period in E.C.PARTITIONS:
+                _save_equity(tmp_path, period, module, curves)
+
+    figures = {}
+    monkeypatch.setattr(E, "plot_equity_drawdown",
+                        lambda equity, path, **kwargs: figures.update({path: equity.columns.tolist()}))
+    assert E.main(["--partition", "combined"]) == 0
+    root = tmp_path / "comparison" / "2016-2022"
+    assert figures[root / "plots" / "overview.png"] == [*books, E.BENCHMARK_BOOK]
+    assert pd.read_csv(root / "daily_returns.csv").columns.tolist() == ["date", *books, E.BENCHMARK_BOOK]
+    table = pd.read_csv(tmp_path / "summary.csv")
+    assert set(zip(table.book, table.phase)) == {
+        (book, period) for book in books for period in ("research", "oos", "combined")
+    }
+    assert table.query("phase == 'oos'").net_ann.tolist() == pytest.approx([12.1] * len(books))
+
+
 def test_longer_horizon_is_a_separate_book_beside_the_current_one(monkeypatch, tmp_path):
     from backtest import engine as E
     from strategies import sticky_core as core, sticky_only as only, sticky_chain as chain

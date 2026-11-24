@@ -38,9 +38,10 @@ python -m research paper-ic --jobs 8
 python -m research five-day-ic --jobs 8
 python -m research candidate-ic
 python -m research xs-robustness
+python -m research chain-ic --jobs 8
 python -m backtest.engine --research --jobs 8
 python -m backtest.engine --family member --oos --jobs 8
-python -m backtest.engine --family member --start 2016 --end 2025
+python -m backtest.engine --start 2016 --end 2025
 python -m backtest.engine sticky_price_blend --research
 python -m pytest tests -p no:cacheprovider
 ```
@@ -53,6 +54,8 @@ runs/strategies/<类别>/comparison/{research,oos,2016-2025}/
 ```
 
 `--family` 选类别，省略时运行全部策略；给出策略名时只运行该策略。每类的对照图写到 `comparison/<区间>/plots/`，各策略的 `performance.png` 和 `yearly/YYYY.png` 都画流动性池等权多头基准（由 `sticky_core` 生成）。完整区间复用已有的分区净值，缺少账本时补跑，再生成 `comparison/2016-2025/plots/overview.png`，同图显示该类 2 套策略和基准，浅色标记样本外。
+
+完整期运行全部策略时，另生成 `runs/strategies/comparison/2016-2025/plots/overview.png` 和 `runs/strategies/summary.csv`。报告中的结果链接指向本地生成的文件，仅克隆仓库时需要先生成这些结果。
 
 默认持有 10 个交易日，策略目标权重乘数为 2，默认策略名省略这 2 项。测试其他持有期仍在账本名中标明天数，例如 `STICKY_ONLY_20D`。
 

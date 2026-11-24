@@ -104,9 +104,9 @@ def load_seat_levels(panel: pd.DataFrame, eligible: pd.DataFrame, jobs: int) -> 
     return {name: parts[name] for name in parts.columns.get_level_values(0).unique()}
 
 
-def load_daily_flow(eligible: pd.DataFrame, oi: pd.DataFrame) -> pd.DataFrame:
+def load_daily_flow(universe: pd.DataFrame, oi: pd.DataFrame) -> pd.DataFrame:
     """读取日度持仓流并用研究分区内的榜单补齐四个预热交易日。"""
-    dates, symbols = eligible.index, eligible.columns
+    dates, symbols = universe.index, universe.columns
     flow_path = C.study_dir("member_ic") / "daily_factors_and_returns.csv"
     C.assert_research_only(flow_path)
     daily = pd.read_csv(flow_path, usecols=["signal_date", "symbol", "FLOW_CONTROL"], parse_dates=["signal_date"])
@@ -119,27 +119,6 @@ def load_daily_flow(eligible: pd.DataFrame, oi: pd.DataFrame) -> pd.DataFrame:
     for s in symbols:
         tables = member_tables(s, warmup, partition="research")
         flow.loc[warmup, s] = daily_position_flow(tables, oi[s].loc[warmup])
-    return flow
-
-
-def _oos_flow_symbol(symbol: str, dates: pd.DatetimeIndex, oi: pd.Series) -> pd.Series:
-    tables = member_tables(symbol, dates, top20=False, partition="oos")
-    return daily_position_flow(tables, oi.loc[dates])
-
-
-def load_oos_daily_flow(
-    eligible: pd.DataFrame, oi: pd.DataFrame, start: pd.Timestamp, jobs: int
-) -> pd.DataFrame:
-    """延续研究期的四日预热及评价期逐日流动性口径。"""
-    dates = eligible.index
-    evaluation = dates[dates >= start]
-    C.assert_oos_dates(evaluation, "样本外持仓流日历")
-    flow_dates = dates[dates < start][-4:].append(evaluation)
-    signals = Parallel(n_jobs=jobs, prefer="threads")(
-        delayed(_oos_flow_symbol)(symbol, flow_dates, oi[symbol]) for symbol in eligible.columns
-    )
-    flow = pd.DataFrame(dict(zip(eligible.columns, signals))).reindex(index=dates)
-    flow.loc[evaluation] = flow.loc[evaluation].where(eligible.loc[evaluation])
     return flow
 
 

@@ -13,7 +13,7 @@ import os
 import pickle
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -40,7 +40,9 @@ MANIFEST_FLUSH_EVERY = 100
 
 
 def parse_day(value: str) -> date:
-    return pd.Timestamp(value).date()
+    if re.fullmatch(r"[0-9]{8}", value):
+        return datetime.strptime(value, "%Y%m%d").date()
+    return date.fromisoformat(value)
 
 
 def missing_ranges(start: date, end: date,
@@ -88,35 +90,11 @@ def merge_frames(existing: pd.DataFrame | None,
     return result
 
 
-def remove_unavailable_cache(root: Path) -> int:
-    """删掉这个账号确认无法使用的米筐服务缓存。"""
-    manifest_path = Path(root) / "coverage.json"
-    if not manifest_path.exists():
-        return 0
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    removed = 0
-    for key in list(manifest.get("items", {})):
-        unavailable = (key.endswith("_front_month")
-                       or key.endswith("_next_month")
-                       or key.endswith("_near_main"))
-        if not unavailable:
-            continue
-        entry = manifest["items"].pop(key)
-        path = Path(root) / entry.get("file", "")
-        if path.is_file():
-            path.unlink()
-        removed += 1
-    if removed:
-        tmp = manifest_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        os.replace(tmp, manifest_path)
-    return removed
-
-
 class CoverageCache:
     def __init__(self, root: Path, dry_run: bool = False):
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        if not dry_run:
+            self.root.mkdir(parents=True, exist_ok=True)
         self.manifest_path = self.root / "coverage.json"
         self.dry_run = dry_run
         self.failures: list[str] = []
@@ -169,16 +147,17 @@ class CoverageCache:
               require_nonempty: bool = False) -> None:
         entry = self._entry(dataset, key)
         path = self.root / entry["file"]
-        if not self.dry_run and entry["coverage"] and not path.exists():
+        if entry["coverage"] and not path.is_file():
             # 覆盖记录还在、文件却没了（例如只拷了 coverage.json）：按未下载处理
             entry["coverage"] = []
             self._manifest_updates += 1
-        if not self.dry_run and require_nonempty and entry["coverage"] and path.exists():
+        if require_nonempty and entry["coverage"]:
             cached = pd.read_pickle(path)
             if cached is None or cached.empty:
                 entry["coverage"] = []
-                path.unlink()
-                self._save_manifest()
+                if not self.dry_run:
+                    path.unlink()
+                    self._save_manifest()
         gaps = missing_ranges(start, end, entry["coverage"])
         if not gaps:
             print(f"已覆盖，跳过: {dataset}/{key}")
@@ -242,7 +221,7 @@ def commodity_instruments(rq, symbols: list[str] | None) -> tuple[list[str], pd.
         selected = sorted(requested.intersection(available))
         missing = sorted(requested - set(available))
         if missing:
-            print(f"米筐未提供这些 all1m 商品代码，跳过: {missing}")
+            print(f"米筐合约清单缺少这些商品品种，跳过: {missing}")
     else:
         selected = sorted(set(symbols))
         unknown = sorted(set(selected) - set(available))
@@ -346,14 +325,14 @@ def main() -> int:
     parser.add_argument("--end-date", default=default_end,
                         help=f"YYYYMMDD，默认昨天 ({default_end})")
     parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS,
-                        help="商品品种代码，默认 all（与 all1m 商品池取交集）")
+                        help="商品品种代码，默认 all（使用米筐期货合约中的商品品种）")
     parser.add_argument("--datasets", nargs="+", choices=DATASETS, default=list(DATASETS),
                         help="选择接口数据集，默认全部")
     parser.add_argument("--contract-rank-sides", nargs="+", choices=MEMBER_SIDES,
                         default=MEMBER_CONTRACT_SIDES, help="合约级榜单类型，默认 long short")
     parser.add_argument("--datapath", type=Path, default=C.DATA_ROOT,
                         help="数据根目录，分别写入 research/daily 和 oos/daily")
-    parser.add_argument("--dry-run", action="store_true", help="显示缺失区间，不调用数据接口")
+    parser.add_argument("--dry-run", action="store_true", help="查询合约清单并显示缺失区间，不下载数据或写文件")
     args = parser.parse_args()
 
     try:
@@ -386,9 +365,6 @@ def main() -> int:
             partition_root = C.daily_dir(partition, output_root)
             if partition == "research":
                 C.assert_research_only(partition_root)
-            removed = 0 if args.dry_run else remove_unavailable_cache(partition_root)
-            if removed:
-                print(f"清理不可用接口缓存项: {removed}")
             cache = CoverageCache(partition_root, dry_run=args.dry_run)
             try:
                 run_download(rq, cache, left, right, requested_symbols, set(args.datasets),

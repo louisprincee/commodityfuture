@@ -20,7 +20,6 @@ import config as C
 import data as D
 from research.factors import member_tables, seat_turnover_groups
 from research.ic_study import _bh, forward_returns, return_matrix
-from research.member_smoothing import load_daily_flow, load_oos_daily_flow
 from research.xs_robustness import START, hac_t
 
 HOLD = 5
@@ -38,7 +37,8 @@ def sticky_quintiles(sticky: pd.DataFrame) -> pd.DataFrame:
     return buckets.where(n.ge(MIN_NAMES), axis=0)
 
 
-def _halves(factor: pd.DataFrame, mask: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def ranked_halves(factor: pd.DataFrame, mask: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """在组内返回因子较高和较低的各一半，奇数时跳过中间一名。"""
     rank = factor.where(mask).rank(axis=1, method="first")
     count = rank.notna().sum(axis=1)
     half = count // 2
@@ -51,18 +51,11 @@ def daily_contrasts(buckets, flow, size, labels) -> pd.DataFrame:
     spreads = {}
     for name, factor in (("flow", flow), ("size", size)):
         for q in range(1, 6):
-            high, low = _halves(factor, buckets.eq(q))
+            high, low = ranked_halves(factor, buckets.eq(q))
             spreads[f"{name}_q{q}"] = labels.where(high).mean(axis=1) - labels.where(low).mean(axis=1)
     spreads["flow_confirmation"] = spreads["flow_q5"] + spreads["flow_q1"]
     spreads["size_amplification"] = spreads["size_q5"] - spreads["size_q1"]
     return pd.DataFrame(spreads)
-
-
-def asymmetric_selections(buckets, flow, size) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """多头端选高持仓流，空头端选低粘性席位份额。"""
-    long, _ = _halves(flow, buckets.eq(5))
-    _, short = _halves(size, buckets.eq(1))
-    return long, short
 
 
 def _seat_state(symbol, dates, market, partition):
@@ -75,23 +68,13 @@ def _seat_state(symbol, dates, market, partition):
     return pd.DataFrame({"sticky": sticky_net / sticky_gross, "size": sticky_gross / visible_gross})
 
 
-def _mask_inputs(eligible, sticky, flow, size, *, common_only: bool):
-    mask = eligible.copy()
-    if common_only:
-        mask &= sticky.notna() & flow.notna() & size.notna()
-    return tuple(frame.where(mask) for frame in (sticky, flow, size))
-
-
-def load_inputs(jobs: int, *, partition: str = "research", common_only: bool = True,
-                panel: pd.DataFrame | None = None):
-    """Load factor inputs, optionally retaining each factor's own valid universe."""
+def load_seat_inputs(panel: pd.DataFrame, jobs: int, *, partition: str):
+    """从会员榜加载流动性池内的粘性净多、席位份额和主力映射。"""
     if partition == "research":
         start = START
-        panel = D.load_panel() if panel is None else panel
         C.assert_no_holdout_dates(panel["date"], "持仓互补研究日面板")
     elif partition == "oos":
         start = pd.Timestamp(C.OOS_START)
-        panel = D.load_evaluation_panel() if panel is None else panel
         C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "持仓互补样本外日面板")
     else:
         raise ValueError(f"未知分区 {partition}")
@@ -113,19 +96,18 @@ def load_inputs(jobs: int, *, partition: str = "research", common_only: bool = T
         for s in names
     )
     states = pd.concat(states, axis=1, keys=names).swaplevel(axis=1)
-    sticky, size = states["sticky"], states["size"]
-    if partition == "research":
-        daily_flow = load_daily_flow(eligible, oi)
-    else:
-        daily_flow = load_oos_daily_flow(eligible, oi, start, jobs)
-    flow = daily_flow.rolling(5, min_periods=5).mean()
-    masked = _mask_inputs(eligible, sticky, flow, size, common_only=common_only)
-    return (*(factor.loc[start:] for factor in masked),
-            wide("c1_contract")[names])
+    return (states["sticky"].where(eligible).loc[start:],
+            states["size"].where(eligible).loc[start:], wide("c1_contract")[names])
 
 
 def run(out: Path, jobs: int) -> pd.DataFrame:
-    sticky, flow, size, contracts = load_inputs(jobs)
+    from research.member_smoothing import load_daily_flow
+
+    panel = D.load_panel()
+    sticky, size, contracts = load_seat_inputs(panel, jobs, partition="research")
+    oi = panel.pivot(index="date", columns="symbol", values="oi_total").reindex_like(contracts)
+    flow = load_daily_flow(contracts, oi).rolling(5, min_periods=5).mean().reindex_like(sticky)
+    sticky = sticky.where(flow.notna() & size.notna())
     bars = D.load_contracts("research")
     returns = return_matrix(contracts, bars.set_index(["contract", "date"])["open"])
     labels = forward_returns(returns, HOLD).reindex_like(sticky)

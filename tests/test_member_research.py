@@ -39,29 +39,8 @@ def test_segment_starts_after_signal_and_compounds_only_its_days():
     assert pd.isna(window_returns(returns, 2, 5).loc[1, "x"])
 
 
-def test_oos_flow_uses_four_warmup_days_and_respects_daily_eligibility(monkeypatch):
-    from research import member_smoothing as M
-
-    dates = pd.to_datetime(["2021-12-27", "2021-12-28", "2021-12-29", "2021-12-30",
-                            "2021-12-31", "2022-01-04", "2022-01-05", "2022-01-06"])
-    eligible = pd.DataFrame({"RB": [False] * 5 + [True, False, True]}, index=dates)
-    oi = pd.DataFrame({"RB": 100.0}, index=dates)
-
-    def synthetic_tables(symbol, days, *, top20, partition):
-        assert symbol == "RB" and partition == "oos" and not top20
-        return {"dL": pd.DataFrame({"seat": 6.0}, index=days),
-                "dS": pd.DataFrame({"seat": 2.0}, index=days)}
-
-    monkeypatch.setattr(M, "member_tables", synthetic_tables)
-    flow = M.load_oos_daily_flow(eligible, oi, pd.Timestamp("2022-01-04"), jobs=1)
-
-    assert flow["RB"].dropna().index.equals(dates[[1, 2, 3, 4, 5, 7]])
-    assert flow["RB"].rolling(5).mean().loc["2022-01-04"] == pytest.approx(.04)
-    assert pd.isna(flow.loc["2022-01-05", "RB"])
-
-
 def test_conditional_splits_stay_inside_each_sticky_tail():
-    from research.member_complementarity import asymmetric_selections, sticky_quintiles
+    from research.member_complementarity import ranked_halves, sticky_quintiles
 
     names = list(range(22))
     sticky = pd.DataFrame([names, [None] * 22], columns=names)
@@ -70,7 +49,8 @@ def test_conditional_splits_stay_inside_each_sticky_tail():
     assert buckets.iloc[0].value_counts().sort_index().tolist() == [5, 4, 4, 4, 5]
     assert buckets.iloc[1].isna().all()
 
-    long, short = asymmetric_selections(buckets, factor, -factor)
+    long, _ = ranked_halves(factor, buckets.eq(5))
+    _, short = ranked_halves(-factor, buckets.eq(1))
     assert long.columns[long.iloc[0]].tolist() == [20, 21]
     assert short.columns[short.iloc[0]].tolist() == [3, 4]
     assert not (long | short).iloc[1].any()
@@ -88,21 +68,6 @@ def test_primary_contrasts_have_the_expected_long_and_short_signs():
     assert daily.at[0, "flow_q5"] == pytest.approx(0.02)
     assert daily.at[0, "flow_confirmation"] == pytest.approx(0.04)
     assert daily.at[0, "size_amplification"] == pytest.approx(0)
-
-
-def test_factor_specific_universe_does_not_require_other_signals():
-    from research.member_complementarity import _mask_inputs
-
-    eligible = pd.DataFrame({"A": [True], "B": [True]})
-    sticky = pd.DataFrame({"A": [0.1], "B": [0.2]})
-    flow = pd.DataFrame({"A": [0.3], "B": [None]})
-    size = pd.DataFrame({"A": [0.4], "B": [0.5]})
-
-    sticky_only, _, _ = _mask_inputs(eligible, sticky, flow, size, common_only=False)
-    common_sticky, _, _ = _mask_inputs(eligible, sticky, flow, size, common_only=True)
-
-    assert sticky_only.loc[0, "B"] == pytest.approx(0.2)
-    assert pd.isna(common_sticky.loc[0, "B"])
 
 
 def test_member_ic_label_uses_entry_contract_on_both_future_trading_dates():
@@ -208,6 +173,21 @@ def test_paper_spider_aggregates_contracts_and_uses_disclosed_contract_oi():
     assert result["K_NET_SHARE"].iloc[0] == pytest.approx(0.1)
 
 
+def test_spider_holiday_distinguishes_weekends_from_weekday_closures():
+    from research.factors import kaiyuan
+
+    days = pd.to_datetime(["2021-04-02", "2021-04-06", "2021-04-09", "2021-04-12"])
+    ranks = pd.DataFrame({"trading_date": days.repeat(2), "contract": "A2105",
+                          "side": ["long", "short"] * len(days), "volume": 10,
+                          "volume_change": [2, -1] * len(days)})
+    contracts = pd.DataFrame({"date": days, "contract": "A2105", "open_interest": 100})
+
+    holiday = kaiyuan(ranks, contracts, days)["SPIDER_HOLIDAY"]
+
+    assert holiday.iloc[:3].tolist() == [0.0, 0.0, 1.0]
+    assert pd.isna(holiday.iloc[-1])
+
+
 def _member_tables(dates, long_pos, short_pos, volume, d_long=None, d_short=None):
     tables = {
         "L": long_pos, "S": short_pos, "V": volume,
@@ -235,7 +215,7 @@ def test_member_crowding1_uses_speculative_seats_only():
     short_pos = pd.DataFrame({"hedger": [3000.0, 3000.0], "spec": [10.0, 10.0]}, index=dates)
     volume = pd.DataFrame({"hedger": [10.0, 10.0], "spec": [500.0, 500.0]}, index=dates)
     market = pd.DataFrame({"volume": [1000.0, 1000.0], "oi": [2000.0, 2000.0], "d_oi": [0.0, 0.0]}, index=dates)
-    out = MS.crowding_indicators(_member_tables(dates, long_pos, short_pos, volume), market)
+    out = MS.crowding(_member_tables(dates, long_pos, short_pos, volume), market)
     assert out["CROWD1"].iloc[0] == pytest.approx((100 - 10) / (100 + 10))
 
 
@@ -265,7 +245,8 @@ def test_member_consistency_camps_and_slope():
         f"m{i}": 1000 + 50 * i + (30 * trend if i >= 6 else noise[:, i % 6] * 5) for i in range(12)
     }, index=dates)
     short_pos = pd.DataFrame({f"m{i}": 900.0 for i in range(12)}, index=dates)
-    out = MS.consistency_indicators(_member_tables(dates, long_pos, short_pos, long_pos), 10)
+    tables = _member_tables(dates, long_pos, short_pos, long_pos)
+    out = MS.consistency_from_net(MS.imputed_net(tables), 10)
     row = out.iloc[-1]
     assert MS.CS["camp_size"] == 5
     assert row["C_LONG"] == pytest.approx(1.0)
@@ -373,47 +354,6 @@ def test_leg_returns_split_top_and_bottom_against_pool_mean():
     assert legs["top"] == pytest.approx((.09 + .08) / 2)
     assert legs["bottom"] == pytest.approx((.01 + .02) / 2)
     assert legs["pool"] == pytest.approx(np.arange(1, 10).mean() / 100)
-
-
-def test_active_flow_uses_volume_board_members_and_blanks_missing_open_interest():
-    from research.factors import active_flow
-
-    day = pd.Timestamp("2020-01-06")
-    ranks = pd.DataFrame({
-        "trading_date": [day] * 10,
-        "contract": ["A2001"] * 4 + ["A2005"] * 4 + ["A2009"] * 2,
-        "side": ["long", "short", "volume", "volume"] * 2 + ["long", "short"],
-        "member_name": ["a", "b", "a", "b", "c", "c", "c", "d", "e", "e"],
-        "volume_change": [4.0, -3.0, 0.0, 0.0, 1.0, -2.0, 0.0, 0.0, 100.0, -100.0],
-    })
-    contracts = pd.DataFrame({
-        "date": [day, day],
-        "contract": ["A2001", "A2005"],
-        "open_interest": [100.0, 50.0],
-    })
-    result = active_flow(ranks, contracts, pd.DatetimeIndex([day]))
-    assert result.at[day, "d_long"] == pytest.approx(5)
-    assert result.at[day, "d_short"] == pytest.approx(-5)
-    assert result.at[day, "disclosed_oi"] == pytest.approx(150)
-    assert result.at[day, "flow"] == pytest.approx(10 / 150)
-
-    off_board = ranks.copy()
-    off_board.loc[off_board.member_name.eq("a") & off_board.side.eq("volume"), "member_name"] = "z"
-    result = active_flow(off_board, contracts, pd.DatetimeIndex([day]))
-    assert result.at[day, "d_long"] == pytest.approx(1)
-    assert result.at[day, "d_short"] == pytest.approx(-5)
-
-    missing_change = ranks.copy()
-    missing_change.loc[missing_change.member_name.eq("c") & missing_change.side.eq("long"), "volume_change"] = np.nan
-    result = active_flow(missing_change, contracts, pd.DatetimeIndex([day]))
-    assert pd.isna(result.at[day, "d_long"])
-    assert pd.isna(result.at[day, "flow"])
-
-    missing_oi = contracts.copy()
-    missing_oi.loc[missing_oi.contract.eq("A2005"), "open_interest"] = np.nan
-    result = active_flow(ranks, missing_oi, pd.DatetimeIndex([day]))
-    assert pd.isna(result.at[day, "disclosed_oi"])
-    assert pd.isna(result.at[day, "flow"])
 
 
 def test_sticky_net_share_separates_sticky_and_one_sided_seats_from_high_turnover():

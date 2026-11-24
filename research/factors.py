@@ -36,8 +36,9 @@ def member_tables(symbol: str, dates: pd.DatetimeIndex, *, top20: bool = False,
         sub = ranks[ranks["side"] == side]
         out[key] = sub.pivot(index="trading_date", columns="member_name", values="volume") \
             .reindex(index=dates, columns=members)
-        out[f"d{key}"] = sub.pivot(index="trading_date", columns="member_name", values="volume_change") \
-            .reindex(index=dates, columns=members)
+        if side != "volume":
+            out[f"d{key}"] = sub.pivot(index="trading_date", columns="member_name", values="volume_change") \
+                .reindex(index=dates, columns=members)
     out["ranked"] = pd.Series(dates.isin(ranks["trading_date"].unique()), index=dates)
     return out
 
@@ -48,26 +49,14 @@ def daily_position_flow(tables: dict[str, pd.DataFrame], oi: pd.Series) -> pd.Se
     return (flow / oi.where(oi.gt(0))).rename("FLOW_CONTROL")
 
 
-def market_inputs(panel: pd.DataFrame, contracts: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """单品种日度市场输入：主力合约、开盘对开盘收益、收盘对收盘收益、单边总成交量与总持仓。"""
+def market_inputs(panel: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """因子所需的当日收盘收益、单边总成交量与总持仓。"""
     p = panel[panel["symbol"] == symbol].set_index("date").sort_index()
-    sub = contracts[contracts["symbol"] == symbol]
-    px = sub.set_index(["contract", "date"])
-    next_open = sub.groupby("contract")["open"].shift(-1)
-    next_open.index = px.index
-    key = pd.MultiIndex.from_arrays([p["c1_contract"].values, p.index])
-    open_today = px["open"].reindex(key).to_numpy(dtype=float)
-    out = pd.DataFrame({
-        "c1_contract": p["c1_contract"],
-        "ret_oo": next_open.reindex(key).to_numpy(dtype=float) / open_today - 1.0,
+    return pd.DataFrame({
         "ret_cc": p["ret1"],
         "volume": p["volume_total"].astype(float),
         "oi": p["oi_total"].astype(float),
     }, index=p.index)
-    out.loc[~(open_today > 0), "ret_oo"] = np.nan
-    out["d_oi"] = out["oi"].diff()
-    out["roll"] = out["c1_contract"].ne(out["c1_contract"].shift()) & out["c1_contract"].shift().notna()
-    return out
 
 
 def bounds(x: pd.Series, window: int, q_high: float, q_low: float) -> tuple[pd.Series, pd.Series]:
@@ -77,30 +66,6 @@ def bounds(x: pd.Series, window: int, q_high: float, q_low: float) -> tuple[pd.S
 
 
 # ---------------------------------------------------------------- 兴业：拥挤度
-
-def crowding_indicators(t: dict[str, pd.DataFrame], mkt: pd.DataFrame) -> pd.DataFrame:
-    """早期截面研究使用的拥挤度口径：CROWD2/3 对多空变动先求和再取绝对值。"""
-    L, S, V, dL, dS = t["L"], t["S"], t["V"], t["dL"], t["dS"]
-    complete = L.notna() & S.notna() & V.notna() & (L + S > 0)
-    net, gross = L - S, L + S
-
-    def share(spec: pd.DataFrame) -> pd.Series:
-        num = net.where(spec).sum(axis=1, min_count=1)
-        den = gross.where(spec).sum(axis=1, min_count=1)
-        return num / den.where(den > 0)
-
-    c1 = share(complete & (V / gross).ge(mkt["volume"] / mkt["oi"], axis=0))
-    c2 = share(complete & ((dL + dS).abs() / V.where(V > 0)).ge(mkt["d_oi"].abs() / mkt["volume"], axis=0))
-
-    w = CR["crowd3_window"]
-    flow = (dL + dS).where(complete)
-    vol = V.where(complete)
-    appear = complete.astype(float).rolling(w, min_periods=w).sum()
-    ratio3 = flow.rolling(w, min_periods=1).sum().abs() / vol.rolling(w, min_periods=1).sum()
-    th3 = mkt["d_oi"].rolling(w, min_periods=w).sum().abs() / mkt["volume"].rolling(w, min_periods=w).sum()
-    c3 = share(complete & appear.ge(CR["crowd3_min_appear"]) & ratio3.ge(th3, axis=0))
-    return pd.DataFrame({"CROWD1": c1, "CROWD2": c2, "CROWD3": c3})
-
 
 def seat_turnover_groups(t: dict[str, pd.DataFrame], mkt: pd.DataFrame):
     """返回可见净持仓、总持仓及两组互斥的席位掩码。"""
@@ -225,11 +190,6 @@ def consistency_from_net(net_positions: pd.DataFrame, window: int) -> pd.DataFra
     return out
 
 
-def consistency_indicators(t: dict[str, pd.DataFrame], window: int) -> pd.DataFrame:
-    """填补版一致性快捷入口。"""
-    return consistency_from_net(imputed_net(t), window)
-
-
 def _tail_signal(value: pd.Series) -> pd.Series:
     hi, lo = bounds(value, CR["reference_window"], CR["q_high"], CR["q_low"])
     result = value.gt(hi).astype(float) - value.lt(lo).astype(float)
@@ -270,8 +230,7 @@ def spider_signal(t: dict[str, pd.DataFrame], active_only: bool) -> pd.Series:
     return sig.where(t["ranked"] & db.notna() & ds.notna())
 
 
-def kaiyuan(ranks: pd.DataFrame, contracts: pd.DataFrame, calendar: pd.DatetimeIndex,
-            *, include_disclosed_oi: bool = False) -> pd.DataFrame:
+def kaiyuan(ranks: pd.DataFrame, contracts: pd.DataFrame, calendar: pd.DatetimeIndex) -> pd.DataFrame:
     """按披露合约汇总原版蜘蛛网、多空增量及净多头占比。"""
     fields = ["volume", "volume_change"]
     if ranks.empty:
@@ -292,11 +251,10 @@ def kaiyuan(ranks: pd.DataFrame, contracts: pd.DataFrame, calendar: pd.DatetimeI
     db, ds = totals[("volume_change", "long")], totals[("volume_change", "short")]
     net_share = (totals[("volume", "long")] - totals[("volume", "short")]) / disclosed_oi.where(disclosed_oi.gt(0))
     free = ((db.gt(0) & ds.lt(0)).astype(float) - (db.lt(0) & ds.gt(0)).astype(float)).where(db.notna() & ds.notna())
-    next_day = calendar.to_series().shift(-1)
-    holiday = free.mask(next_day.sub(calendar.to_series()).dt.days.gt(1), 0).where(free.notna() & next_day.notna())
+    weekdays = calendar.to_numpy(dtype="datetime64[D]")
+    holiday = free.iloc[:-1].mask(np.busday_count(weekdays[:-1], weekdays[1:]) > 1, 0).reindex(calendar)
+    holiday = holiday.where(free.notna())
     out = {"K_DB": db, "K_DS": ds, "SPIDER_HOLIDAY": holiday, "SPIDER_FREE": free, "K_NET_SHARE": net_share}
-    if include_disclosed_oi:
-        out["disclosed_oi"] = disclosed_oi
     for window in NET_WINDOWS:
         change = net_share.diff(window)
         out[f"K_NET_{window}"] = change
@@ -304,64 +262,6 @@ def kaiyuan(ranks: pd.DataFrame, contracts: pd.DataFrame, calendar: pd.DatetimeI
             signal = change.gt(threshold).astype(float) - change.lt(-threshold).astype(float)
             out[f"K_NET_{window}_S{int(threshold * 100):02d}"] = signal.where(change.notna())
     return pd.DataFrame(out, index=calendar)
-
-
-def active_flow(ranks: pd.DataFrame, contracts: pd.DataFrame,
-                calendar: pd.DatetimeIndex) -> pd.DataFrame:
-    """同合约、同日成交榜会员的多空持仓增量，分母为这些合约的持仓量。
-
-    合约须同时有多头、空头和成交三榜。任一参与增量缺失，或任一入选合约持仓缺失，则当日流量缺失。
-    某一侧没有成交榜会员时，该侧增量记为 0，不把缺失当成无法计算。
-    """
-    calendar = pd.DatetimeIndex(pd.to_datetime(calendar)).normalize()
-    empty = pd.DataFrame(np.nan, index=calendar, columns=["d_long", "d_short", "disclosed_oi", "flow"])
-    if ranks.empty:
-        return empty
-    ranks = ranks.copy()
-    ranks["trading_date"] = pd.to_datetime(ranks["trading_date"]).dt.normalize()
-    keys = ["trading_date", "contract"]
-    covered = ranks.groupby(keys)["side"].nunique()
-    valid = covered[covered.eq(3)].index.to_frame(index=False)
-    if valid.empty:
-        return empty
-    holdings = ranks.loc[ranks.side.isin(["long", "short"])].merge(valid, on=keys)
-    participants = ranks.loc[ranks.side.eq("volume"), [*keys, "member_name"]].drop_duplicates()
-    active = holdings.merge(participants.assign(on_volume=True), on=[*keys, "member_name"], how="left")
-    active = active.loc[active["on_volume"].eq(True)]
-    if active.empty:
-        present = pd.DataFrame(0, index=calendar, columns=["long", "short"])
-        totals = pd.DataFrame(np.nan, index=calendar, columns=["long", "short"])
-    else:
-        present = active.groupby(["trading_date", "side"]).size().unstack("side")
-        present = present.reindex(index=calendar, columns=["long", "short"], fill_value=0)
-        changes = active.groupby(["trading_date", "side"])["volume_change"]
-        totals = changes.sum(min_count=1).where(changes.count().eq(changes.size())).unstack("side")
-        totals = totals.reindex(index=calendar, columns=["long", "short"])
-    covered_days = valid.groupby("trading_date").size().reindex(calendar, fill_value=0).gt(0)
-    d_long = totals["long"].mask(present["long"].eq(0) & covered_days, 0.0).where(covered_days)
-    d_short = totals["short"].mask(present["short"].eq(0) & covered_days, 0.0).where(covered_days)
-    if contracts.empty:
-        disclosed_oi = pd.Series(np.nan, index=calendar)
-        flow = (d_long - d_short).div(disclosed_oi)
-        return pd.DataFrame(
-            {"d_long": d_long, "d_short": d_short, "disclosed_oi": disclosed_oi, "flow": flow},
-            index=calendar,
-        )
-    contracts = contracts.copy()
-    contracts["date"] = pd.to_datetime(contracts["date"]).dt.normalize()
-    disclosed = valid.merge(
-        contracts[["date", "contract", "open_interest"]],
-        left_on=keys, right_on=["date", "contract"], how="left", validate="many_to_one",
-    )
-    grouped_oi = disclosed.groupby("trading_date")["open_interest"]
-    disclosed_oi = grouped_oi.sum(min_count=1).where(
-        grouped_oi.size().eq(grouped_oi.count())
-    ).reindex(calendar)
-    flow = (d_long - d_short).div(disclosed_oi.where(disclosed_oi.gt(0)))
-    return pd.DataFrame(
-        {"d_long": d_long, "d_short": d_short, "disclosed_oi": disclosed_oi, "flow": flow},
-        index=calendar,
-    )
 
 
 def kaiyuan_active(ranks: pd.DataFrame, calendar: pd.DatetimeIndex) -> pd.DataFrame:
@@ -388,30 +288,23 @@ def kaiyuan_active(ranks: pd.DataFrame, calendar: pd.DatetimeIndex) -> pd.DataFr
 
 
 def symbol_factors(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,
-                   calendar: pd.DatetimeIndex, contract_ranks: pd.DataFrame,
-                   *, include_experiments: bool = True) -> pd.DataFrame:
+                   calendar: pd.DatetimeIndex, contract_ranks: pd.DataFrame) -> pd.DataFrame:
     """单品种全套研报指标与实验对照列。"""
-    market = market_inputs(panel, contracts, symbol).reindex(calendar)
-    tables = member_tables(symbol, calendar, top20=not include_experiments)
+    market = market_inputs(panel, symbol).reindex(calendar)
+    tables = member_tables(symbol, calendar)
     crowd = crowding(tables, market)
     crowd_signals = {
         f"{name}_TAIL": crowding_signal(crowd[name], market["ret_cc"], CR["reference_window"])
         for name in ("CROWD1", "CROWD2", "CROWD3")
     }
     strict = tables["L"] - tables["S"]
-    samples = [(strict, "")]
-    if include_experiments:
-        samples.append((imputed_net(tables), "_FILLED"))
-    else:
-        crowd = crowd.drop(columns="CROWD3_4D")
+    samples = [(strict, ""), (imputed_net(tables), "_FILLED")]
     consistency = [
         xingye_consistency(net, tag, window)
         for net, tag in samples
         for window in CONSISTENCY_WINDOWS
     ]
     parts = [crowd, pd.DataFrame(crowd_signals), *consistency, kaiyuan(contract_ranks, contracts, calendar)]
-    if not include_experiments:
-        return pd.concat(parts, axis=1)
     return pd.concat([
         *parts,
         daily_position_flow(tables, market["oi"]),

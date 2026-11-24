@@ -15,5 +15,4 @@ if str(_SRC) not in sys.path:
 class Targets:
     weights: pd.DataFrame
     dominant: pd.DataFrame
-    benchmark: pd.DataFrame | None = None
     selection: pd.DataFrame | None = None

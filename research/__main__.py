@@ -8,7 +8,7 @@ import config as C
 import data as D
 
 COMMANDS = ("panel", "member-ic", "paper-ic", "five-day-ic", "candidate-ic", "xs-robustness",
-            "member-smoothing", "member-complementarity", "chain-ic", "plot-ic")
+            "member-smoothing", "member-complementarity", "chain-ic", "behavior-family", "plot-ic")
 
 
 def main(argv: list[str]) -> int:
@@ -44,6 +44,12 @@ def main(argv: list[str]) -> int:
         out = C.study_dir("member_complementarity")
         result = member_complementarity.run(out, args.jobs)
         print(f"{len(result)} 项持仓条件价差写入 {out}")
+        return 0
+    if cmd == "behavior-family":
+        from research import member_behavior_family
+        out = C.study_dir("member_behavior")
+        result = member_behavior_family.run(out, args.jobs)
+        print(f"{len(result)} 项事先声明的持仓行为检验写入 {out}")
         return 0
     if cmd == "chain-ic":
         from research import member_behavior

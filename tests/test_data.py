@@ -66,6 +66,41 @@ def test_holdout_date_guard():
         C.assert_no_holdout_dates(pd.to_datetime(["2022-01-04"]))
 
 
+def test_partial_fee_refresh_keeps_dates_the_vendor_did_not_return(tmp_path):
+    from download.getFeeHistory import update_history
+
+    path = tmp_path / "fee_history.csv"
+    dates = pd.to_datetime(["2021-12-29", "2021-12-30", "2021-12-31"])
+    existing = pd.DataFrame({"symbol": ["A", "A", "B"], "trading_date": dates, "open_commission": [1., 2., 3.]})
+    existing.to_csv(path, index=False)
+    incoming = existing.iloc[[1]].assign(open_commission=4.)
+
+    update_history(path, "research", incoming)
+
+    expected = existing.copy()
+    expected.loc[1, "open_commission"] = 4.
+    pd.testing.assert_frame_equal(pd.read_csv(path, parse_dates=["trading_date"]), expected)
+
+
+def test_dry_run_reports_missing_covered_files_without_writes(tmp_path, capsys):
+    import datetime as dt
+    import json
+    from download.getExternal import CoverageCache
+
+    manifest = tmp_path / "coverage.json"
+    saved = json.dumps({"items": {"contracts/A": {"file": "contracts/A.pkl",
+                                                  "coverage": [["20210104", "20210104"]]}}})
+    manifest.write_text(saved, encoding="utf-8")
+    cache = CoverageCache(tmp_path, dry_run=True)
+    day = dt.date(2021, 1, 4)
+
+    cache.fetch("contracts", "A", day, day, lambda *_: pytest.fail("Dry run fetched data"))
+
+    assert "20210104-20210104" in capsys.readouterr().out
+    assert manifest.read_text(encoding="utf-8") == saved
+    assert not (tmp_path / "contracts").exists()
+
+
 def synthetic_panel(n_days: int = 400, symbols=("AA", "BB", "CC", "DD"), seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     dates = pd.bdate_range("2010-01-04", periods=n_days)
@@ -124,33 +159,6 @@ def test_to_single_sided_halves_only_before_2020():
     assert out["total_turnover"].tolist() == [2e6, 2e6]
     assert out["close"].tolist() == [100.0, 100.0]
     assert frame["volume"].tolist() == [200, 100]
-
-
-def test_member_rank_daily_uses_ranked_contract_oi(monkeypatch):
-    import data as D
-
-    day = pd.Timestamp("2021-06-15")
-    ranks = pd.DataFrame({
-        "trading_date": [day] * 4, "symbol": "XX", "side": ["long", "long", "short", "volume"],
-        "rank": [1, 2, 1, 1], "member_name": ["a", "b", "a", "a"],
-        "volume": [300.0, 200.0, 400.0, 9e9], "volume_change": [0.0] * 4,
-    })
-    by_contract = pd.DataFrame({
-        "trading_date": [day, day], "contract": ["XX2110", "XX2110"],
-        "side": ["long", "short"], "member_name": ["a", "a"],
-        "volume": [300.0, 400.0], "volume_change": [0.0, 0.0],
-    })
-    contracts = pd.DataFrame({
-        "date": [day] * 3, "symbol": "XX",
-        "contract": ["XX2110", "XX2201", "XX2205"],
-        "open_interest": [1000.0, 500.0, 100.0],
-    })
-    monkeypatch.setattr(D, "load_member_rank", lambda symbol, partition="research": ranks)
-    monkeypatch.setattr(D, "load_member_rank_contracts", lambda symbol, partition="research": by_contract)
-    out = D.member_rank_daily("XX", contracts).iloc[0]
-    assert out["top20_long"] == 500.0 and out["top20_short"] == 400.0
-    assert out["ranked_oi"] == 1000.0 and out["n_ranked_contracts"] == 1
-    assert out["total_oi"] == 1600.0
 
 
 def test_member_rank_download_rejects_empty_and_invalidates_empty_cache(tmp_path):

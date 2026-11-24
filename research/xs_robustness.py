@@ -25,7 +25,6 @@
   R3  波动状态：过去 60 日等权收益波动率高于 / 不高于其截至 t 的扩展中位数，两组 IC 均值同为正
   R4  2016–2021 六个年度中至少 5 个年度 IC 均值为正
   R5  多头腿与空头腿都赚钱：前 20% 等权收益减池均值 > 0，且池均值减后 20% 等权收益 > 0
-  全部通过者进入等权秩合成；合成在同一窗口内只作描述，不是样本外证据。
 """
 from __future__ import annotations
 
@@ -129,6 +128,7 @@ def membership_turnover(score: pd.DataFrame, tail: float = TAIL) -> float:
 def _member_factors(path: Path, oi: pd.DataFrame) -> dict[str, pd.DataFrame]:
     cols = ["signal_date", "symbol", "K_DB", "K_DS", "FLOW_CONTROL", "K_NET_SHARE"]
     daily = pd.read_csv(path, usecols=cols, parse_dates=["signal_date"])
+    C.assert_no_holdout_dates(daily["signal_date"], "会员因子文件")
     wide = {c: daily.pivot(index="signal_date", columns="symbol", values=c) for c in cols[2:]}
     denom = oi.reindex_like(wide["K_DB"])
     denom = denom.where(denom.gt(0))
@@ -182,7 +182,7 @@ def _evaluate_family(scores: dict[str, pd.DataFrame], labels: dict[int, pd.DataF
     judge = result.loc[result.horizon.eq(JUDGE_H)].set_index("factor")
     pos_years = yearly_df.loc[yearly_df.horizon.eq(JUDGE_H)].groupby("factor")["mean_ic"].apply(lambda s: int(s.gt(0).sum()))
     checks = pd.DataFrame({
-        "R1_q_any": result.groupby("factor")[q_col].min().lt(0.05),
+        "R1_q_any": (result[q_col].lt(0.05) & result["mean_ic"].gt(0)).groupby(result["factor"]).any(),
         "R2_trend": judge["ic_trend_up"].gt(0) & judge["ic_not_trend_up"].gt(0),
         "R3_vol": judge["ic_vol_high"].gt(0) & judge["ic_not_vol_high"].gt(0),
         "R4_years": pos_years.ge(5),
@@ -193,7 +193,7 @@ def _evaluate_family(scores: dict[str, pd.DataFrame], labels: dict[int, pd.DataF
     return result, yearly_df, legs_yearly_df, checks, daily_ic
 
 
-def seat_purified_scores(panel: pd.DataFrame, contracts: pd.DataFrame,
+def seat_purified_scores(panel: pd.DataFrame,
                          dates: pd.DatetimeIndex, symbols: list[str],
                          eligible: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """独立事后检验族：按 CROWD1 换手门槛拆分的 STICKY_NET_SHARE 与 SPEC_NET_SHARE。"""
@@ -203,7 +203,7 @@ def seat_purified_scores(panel: pd.DataFrame, contracts: pd.DataFrame,
     for sym in symbols:
         if not (rank_root / f"{sym}_long.pkl").is_file():
             continue
-        mkt = F.market_inputs(panel, contracts, sym).reindex(dates)
+        mkt = F.market_inputs(panel, sym).reindex(dates)
         tables = F.member_tables(sym, dates, top20=True, partition="research")
         split = F.sticky_net_share(tables, mkt)
         sticky[sym] = split["STICKY_NET_SHARE"]
@@ -242,7 +242,6 @@ def build_inputs(member_path: Path):
     bars = contracts[["contract", "date", "open"]]
     returns = return_matrix(wide("c1_contract")[symbols], bars.set_index(["contract", "date"])["open"])
     labels = {h: forward_returns(returns, h).loc[sample] for h in HORIZONS}
-    labels[1] = returns.shift(-1).loc[sample]
 
     market = ret1.where(eligible).mean(axis=1)
     trend = market.rolling(STATE_WINDOW, min_periods=STATE_WINDOW).sum()
@@ -252,14 +251,14 @@ def build_inputs(member_path: Path):
         "trend_up": trend.gt(0).where(trend.notna()),
         "vol_high": vol.gt(vol_med).where(vol_med.notna()),
     }).loc[sample]
-    seat_scores = seat_purified_scores(panel, contracts, dates, symbols, eligible)
-    return scores, labels, states, ret1, seat_scores
+    seat_scores = seat_purified_scores(panel, dates, symbols, eligible)
+    return scores, labels, states, seat_scores
 
 
 def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     member_path = member_path or C.study_dir("member_ic") / "daily_factors_and_returns.csv"
     C.assert_research_only(member_path)
-    scores, labels, states, _, seat_scores = build_inputs(member_path)
+    scores, labels, states, seat_scores = build_inputs(member_path)
 
     result, yearly, legs_yearly, checks, daily_ic = _evaluate_family(
         scores, labels, states, FAMILY, SIGNS, "q_primary",

@@ -72,8 +72,6 @@ def contract_spans(partition: str) -> pd.DataFrame:
 
 
 def main():
-    import rqdatac as rq
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--partition", choices=list(PARTITION_CACHE), default="research")
     parser.add_argument("--price-limits-only", action="store_true")
@@ -82,6 +80,8 @@ def main():
     if not credentials:
         print("交易参数缺少米筐配置", file=sys.stderr)
         return 1
+    import rqdatac as rq
+
     rq.init(*credentials)
     spans = contract_spans(args.partition)
     cache_dir = PARTITION_CACHE[args.partition]

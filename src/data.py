@@ -10,9 +10,6 @@ import pandas as pd
 
 import config as C
 
-PARTITIONS = C.PARTITIONS
-
-
 def external_root(partition: str) -> Path:
     return C.daily_dir(partition)
 
@@ -39,10 +36,10 @@ def to_single_sided(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_contracts(partition: str = "research", raw_units: bool = False) -> pd.DataFrame:
+def load_contracts(partition: str = "research") -> pd.DataFrame:
     """全部商品合约日行情，长表：contract、date、symbol 与价格/量/持仓字段。
 
-    默认返回单边口径的成交量、成交额与持仓量；raw_units=True 只供数据检查核对原始口径。
+    成交量、成交额与持仓量统一为单边口径。
     """
     root = external_root(partition) / "contracts"
     _guard(root, partition)
@@ -51,6 +48,8 @@ def load_contracts(partition: str = "research", raw_units: bool = False) -> pd.D
         _guard(path, partition)
         frames.append(pd.read_pickle(path))
     frames = [f for f in frames if f is not None and not f.empty]
+    if not frames:
+        raise FileNotFoundError(f"缺少逐合约日行情缓存: {root}")
     out = pd.concat(frames).reset_index().rename(columns={"order_book_id": "contract"})
     out["date"] = pd.to_datetime(out["date"]).dt.normalize()
     out["symbol"] = out["contract"].str.extract(r"^([A-Z]+)\d{4}$", expand=False)
@@ -62,8 +61,7 @@ def load_contracts(partition: str = "research", raw_units: bool = False) -> pd.D
     if partition == "research":
         out = apply_legacy_contracts(out)
     _check_dates(out["date"], partition, "合约日行情")
-    if not raw_units:
-        out = to_single_sided(out)
+    out = to_single_sided(out)
     return out.sort_values(["symbol", "contract", "date"], kind="mergesort").reset_index(drop=True)
 
 
@@ -244,32 +242,6 @@ def load_member_rank_contracts(symbol: str, partition: str = "research",
     return pd.concat(parts, ignore_index=True)
 
 
-def member_rank_daily(symbol: str, contracts: pd.DataFrame, partition: str = "research") -> pd.DataFrame:
-    """品种日度汇总：前 20 名多、空持仓合计，入榜合约数与入榜合约单边持仓合计（排名占比的分母）。"""
-    ranks = load_member_rank(symbol, partition)
-    if ranks.empty:
-        return pd.DataFrame()
-    held = ranks[ranks["side"].isin(["long", "short"])]
-    top = held.pivot_table(index="trading_date", columns="side", values="volume", aggfunc="sum")
-    top = top.reindex(columns=["long", "short"]).add_prefix("top20_")
-    top["n_long"] = held[held.side == "long"].groupby("trading_date").size()
-    top["n_short"] = held[held.side == "short"].groupby("trading_date").size()
-    by_contract = load_member_rank_contracts(symbol, partition)
-    if not by_contract.empty:
-        ranked = by_contract[["trading_date", "contract"]].drop_duplicates()
-        oi = contracts.loc[contracts["symbol"] == symbol, ["date", "contract", "open_interest"]]
-        ranked = ranked.merge(oi, left_on=["trading_date", "contract"], right_on=["date", "contract"], how="left")
-        agg = ranked.groupby("trading_date").agg(n_ranked_contracts=("contract", "nunique"),
-                                                 ranked_oi=("open_interest", "sum"),
-                                                 ranked_oi_missing=("open_interest", lambda s: int(s.isna().sum())))
-        top = top.join(agg)
-    total = contracts[contracts["symbol"] == symbol].groupby("date")["open_interest"].sum()
-    top["total_oi"] = total.reindex(top.index).values
-    top["symbol"] = symbol
-    top.index.name = "trading_date"
-    return top.reset_index()
-
-
 def symbols_with_data(partition: str = "research") -> list[str]:
     root = external_root(partition) / "dominant"
     _guard(root, partition)
@@ -307,7 +279,7 @@ def build_daily_panel(partition: str = "research", symbols: list[str] | None = N
     等价于论文的比例法后复权；主力 rank1 由米筐按前一交易日数据确定。
     """
     contracts = load_contracts(partition)
-    leg_contracts = load_contracts_span(partition)
+    leg_contracts = contracts if partition == "research" else load_contracts_span(partition)
     symbols = symbols or symbols_with_data(partition)
     totals = contracts.groupby(["symbol", "date"]).agg(
         oi_total=("open_interest", "sum"), turnover_total=("total_turnover", "sum"),
@@ -341,6 +313,20 @@ def build_daily_panel(partition: str = "research", symbols: list[str] | None = N
     panel["sector"] = panel["symbol"].map(C.SECTOR)
     _check_dates(panel["date"], partition, "日面板")
     return panel.sort_values(["date", "symbol"], kind="mergesort").reset_index(drop=True)
+
+
+def member_universe(panel: pd.DataFrame, start: pd.Timestamp, partition: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """流动性资格、主力映射和评价期内具有会员榜文件的商品品种。"""
+    panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
+    panel = panel.assign(eligible=eligibility(panel))
+    eligible = panel.pivot(index="date", columns="symbol", values="eligible").eq(True)
+    rank_root = C.daily_dir(partition) / "member_rank"
+    if partition == "research":
+        C.assert_research_only(rank_root)
+    names = [name for name in eligible.columns[eligible.loc[start:].any()]
+             if (rank_root / f"{name}_long.pkl").is_file()]
+    dominant = panel.pivot(index="date", columns="symbol", values="c1_contract")
+    return eligible[names], dominant[names]
 
 
 def eligibility(panel: pd.DataFrame) -> pd.Series:

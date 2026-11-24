@@ -71,9 +71,15 @@ def _score_variants(name: str, raw: pd.Series) -> dict[str, pd.Series]:
     return {"raw": score, "delta": delta, "z": delta / prior.std().where(lambda value: value.gt(0))}
 
 
+SEAT_POST_HOC = ("STICKY_NET_SHARE", "SPEC_NET_SHARE")
+
+
 def _factor_family(name: str) -> str:
     if "FILLED" in name or name.endswith(("_PROXY", "_CONTROL", "_4D")):
         return "sensitivity"
+    if name in SEAT_POST_HOC:
+        # 事后提出的席位拆分，不并入研报指标的主检验族，在 xs_robustness 中单独做 BH。
+        return "seat_post_hoc"
     return "paper_signal" if _discrete(name) else "paper_indicator"
 
 
@@ -133,16 +139,13 @@ def return_matrix(contract_map: pd.DataFrame, bar_open: pd.Series) -> pd.DataFra
 
 
 def _one_symbol_paper(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,
-                      dates: pd.DatetimeIndex, include_active: bool = False) -> pd.DataFrame:
-    sides = D.MEMBER_SIDES if include_active else ("long", "short")
-    ranks = D.load_member_rank_contracts(symbol, "research", sides)
+                      dates: pd.DatetimeIndex) -> pd.DataFrame:
+    ranks = D.load_member_rank_contracts(symbol, "research", D.MEMBER_SIDES)
     if not ranks.empty:
         ranks = ranks.loc[ranks["rank"].between(1, 20)]
-    position_ranks = ranks.loc[ranks.side.ne("volume")] if include_active and not ranks.empty else ranks
+    position_ranks = ranks.loc[ranks.side.ne("volume")] if not ranks.empty else ranks
     result = F.symbol_factors(symbol, panel, contracts, dates, position_ranks)
-    if include_active:
-        result = result.join(F.kaiyuan_active(ranks, dates)[["SPIDER_ACTIVE", "SPIDER_SAME_COVERAGE"]])
-    return result
+    return result.join(F.kaiyuan_active(ranks, dates)[["SPIDER_ACTIVE", "SPIDER_SAME_COVERAGE"]])
 
 
 # ---------------------------------------------------------------- 1) member-ic
@@ -170,7 +173,7 @@ def summarize_symbol(symbol: str, daily: pd.DataFrame, factors, min_days: int = 
 def _one_symbol_member_ic(symbol: str, panel: pd.DataFrame, bars: pd.DataFrame,
                           calendar: pd.DatetimeIndex, start: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
     """与全市场截面 IC 使用完全一致的流动性掩码、研报因子集、开盘收益标签与最少有效天数。"""
-    features = _one_symbol_paper(symbol, panel, bars, calendar, include_active=True)
+    features = _one_symbol_paper(symbol, panel, bars, calendar)
     eligible = panel.set_index("date")["eligible"].reindex(calendar).astype("boolean").fillna(False).astype(bool)
     features = features.where(eligible)
     dominant = panel.set_index("date")["c1_contract"].reindex(calendar)
@@ -230,7 +233,7 @@ def run_paper_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
     by_symbol = dict(tuple(contracts.groupby("symbol", sort=False)))
     panel_by_symbol = dict(tuple(panel.groupby("symbol", sort=False)))
     pieces = Parallel(n_jobs=jobs, max_nbytes=None)(
-        delayed(_one_symbol_paper)(s, panel_by_symbol[s], by_symbol[s], dates, include_active=True) for s in symbols
+        delayed(_one_symbol_paper)(s, panel_by_symbol[s], by_symbol[s], dates) for s in symbols
     )
     factors = pd.concat(pieces, axis=1, keys=symbols).swaplevel(axis=1)
     contract_map = panel.pivot(index="date", columns="symbol", values="c1_contract").reindex(index=dates, columns=symbols)
@@ -307,7 +310,7 @@ def study_inputs(panel: pd.DataFrame, jobs: int):
     by_symbol = dict(tuple(bars.loc[bars.symbol.isin(names), ["symbol", "contract", "date", "open", "open_interest"]]
                            .groupby("symbol")))
     pieces = Parallel(n_jobs=jobs, max_nbytes=None)(
-        delayed(_one_symbol_paper)(name, panels[name], by_symbol[name], dates, include_active=True) for name in names
+        delayed(_one_symbol_paper)(name, panels[name], by_symbol[name], dates) for name in names
     )
     factors = pd.concat(pieces, axis=1, keys=names).swaplevel(axis=1)
     eligible = panel.assign(eligible=eligible).pivot(index="date", columns="symbol", values="eligible")

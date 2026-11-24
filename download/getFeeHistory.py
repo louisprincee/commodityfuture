@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import pandas as pd
 
@@ -80,6 +82,41 @@ def one_symbol(rq, symbol: str, start: str, end: str) -> pd.DataFrame | None:
     ]
 
 
+def update_history(path: Path, partition: str, incoming: pd.DataFrame) -> pd.DataFrame:
+    """只替换本次实际取得的品种日记录，校验后原子写入。"""
+    if partition == "research":
+        C.assert_research_only(path)
+    check_dates = C.assert_oos_dates if partition == "oos" else C.assert_no_holdout_dates
+    keys = ["symbol", "trading_date"]
+
+    def indexed(table: pd.DataFrame) -> pd.DataFrame:
+        check_dates(table["trading_date"], "手续费下载")
+        if table[keys].isna().any().any() or table.duplicated(keys).any():
+            raise ValueError("手续费的品种或交易日缺失或重复")
+        return table.set_index(keys)
+
+    current = indexed(incoming)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".csv.lock")
+    with lock.open("x"):
+        pass
+    try:
+        if path.exists():
+            previous = indexed(pd.read_csv(path, parse_dates=["trading_date"]))
+            current = pd.concat([previous.drop(index=current.index, errors="ignore"), current])
+        table = current.sort_index().reset_index()
+        with NamedTemporaryFile(dir=path.parent, suffix=".csv.tmp", delete=False) as tmp:
+            temporary = Path(tmp.name)
+        try:
+            table.to_csv(temporary, index=False, date_format="%Y-%m-%d")
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    finally:
+        lock.unlink()
+    return table
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--partition", choices=list(WINDOWS), default="research")
@@ -114,21 +151,7 @@ def main() -> int:
     if not parts:
         print("窗口内没有主力合约，未改文件", path)
         return 0
-    table = pd.concat(parts, ignore_index=True)
-    if path.exists():
-        old = pd.read_csv(path, parse_dates=["trading_date"])
-        replaced = old.symbol.isin(set(table.symbol)) & old.trading_date.between(
-            pd.Timestamp(start), pd.Timestamp(end))
-        table = pd.concat([old[~replaced], table], ignore_index=True)
-    table = table.sort_values(["symbol", "trading_date"])
-    if args.partition == "oos":
-        C.assert_oos_dates(table.trading_date, "手续费下载")
-    else:
-        C.assert_no_holdout_dates(table.trading_date, "手续费下载")
-    if table.duplicated(["symbol", "trading_date"]).any():
-        raise ValueError("手续费有重复品种/日期")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table.to_csv(path, index=False, date_format="%Y-%m-%d")
+    table = update_history(path, args.partition, pd.concat(parts, ignore_index=True))
     print(path, table.shape, table.symbol.nunique())
     return 0
 

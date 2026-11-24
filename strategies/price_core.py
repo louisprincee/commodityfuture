@@ -6,19 +6,15 @@
 import pandas as pd
 
 from strategies import Targets
-from strategies import sticky_core as core
+from strategies.common import PRICE_FACTORS, ranked_targets
 
 STRATEGY_ID = "price_core"
 MAIN_BOOK = "PRICE_CORE"
 EQUITY_CURVE_FILE = "equity_curves.csv"
-SCORE_FACTORS = ("BASIS_MOM_242", "NEG_SKEW_242")
-HORIZON = core.HORIZON
-TARGET_MULTIPLIER = core.TARGET_MULTIPLIER
-NAME_CAP = core.NAME_CAP
 
 
-def build_targets(panel: pd.DataFrame, bars: pd.DataFrame, start: pd.Timestamp,
-                  partition: str, jobs: int, *, horizon: int = HORIZON) -> Targets:
-    targets = core.build_targets(panel, bars, start, partition, jobs, horizon=horizon,
-                                 score_factors=SCORE_FACTORS)
-    return Targets(targets.weights, targets.dominant, selection=targets.selection)
+def build_targets(panel: pd.DataFrame, _bars: pd.DataFrame, start: pd.Timestamp,
+                  partition: str, jobs: int) -> Targets:
+    if partition != "research":
+        raise ValueError("价格因子对照只运行研究期")
+    return ranked_targets(panel, start, partition, jobs, PRICE_FACTORS)

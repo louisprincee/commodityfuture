@@ -19,7 +19,7 @@ def test_blend_nets_opposing_sleeves_without_restoring_target_gross():
 
     names = list(range(20))
     sticky = pd.DataFrame([names], columns=names)
-    weights = blend_weights(sticky, sticky, sticky, -sticky, -sticky, sticky.notna())
+    weights = blend_weights(sticky, sticky, -sticky, -sticky)
 
     assert weights.iloc[0].sum() == pytest.approx(0)
     assert weights.iloc[0].abs().sum() == pytest.approx(0.5)
@@ -47,6 +47,7 @@ def test_price_blend_requires_only_its_signals_and_rechecks_pool_size(invalid_fa
 
 def test_sticky_chain_targets_only_need_net_share_and_chain_score(monkeypatch):
     from strategies import sticky_chain
+    from strategies.common import HORIZON
 
     names = list(range(20))
     dates = pd.date_range("2016-01-04", periods=2)
@@ -56,11 +57,62 @@ def test_sticky_chain_targets_only_need_net_share_and_chain_score(monkeypatch):
     dominant = pd.DataFrame("contract", index=dates, columns=names)
     monkeypatch.setattr(sticky_chain, "load_chain_inputs", lambda *args, **kwargs: (sticky, chain, dominant))
 
-    targets = sticky_chain.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "research", 1, horizon=1)
+    targets = sticky_chain.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "research", 1)
 
-    assert targets.weights.iloc[0].abs().sum() == pytest.approx(1)
-    assert targets.weights.iloc[1].eq(0).all()
+    assert targets.weights.iloc[0].abs().sum() * HORIZON == pytest.approx(1)
+    assert targets.weights.iloc[1].equals(targets.weights.iloc[0])
     assert targets.dominant is dominant
+
+
+@pytest.mark.parametrize("partition,start", [("research", "2016-01-04"), ("oos", "2022-01-01")])
+def test_sticky_only_targets_need_no_flow_file(monkeypatch, tmp_path, partition, start):
+    from research import member_complementarity as M
+    from strategies import sticky_only
+    from strategies.common import HORIZON
+
+    start = pd.Timestamp(start)
+    dates = pd.bdate_range(start, periods=2)
+    names = sorted(M.C.COMMODITY_SYMBOLS[:10])
+    panel = pd.MultiIndex.from_product([dates, names], names=["date", "symbol"]).to_frame(index=False)
+    panel = panel.assign(volume_total=100, oi_total=100, c1_contract=panel.symbol + "0001")
+    rank_dir = tmp_path / "member_rank"
+    rank_dir.mkdir()
+    for name in names:
+        (rank_dir / f"{name}_long.pkl").touch()
+
+    monkeypatch.setattr(M.C, "daily_dir", lambda part: tmp_path)
+    monkeypatch.setattr(M.C, "study_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(M.D, "eligibility", lambda p: p.symbol.ne(names[4]))
+    monkeypatch.setattr(M, "_seat_state", lambda name, days, market, part:
+                        pd.DataFrame({"sticky": names.index(name), "size": 0.5}, index=days))
+
+    targets = sticky_only.build_targets(panel, pd.DataFrame(), start, partition, 1)
+    fresh = targets.weights.iloc[0] * HORIZON
+    assert fresh[fresh.gt(0)].index.tolist() == names[-2:]
+    assert fresh[fresh.lt(0)].index.tolist() == names[:2]
+    assert fresh.abs().sum() == pytest.approx(1.0)
+    assert targets.dominant.loc[dates[0], names[-1]] == names[-1] + "0001"
+
+
+def test_benchmark_does_not_run_any_unselected_strategy(monkeypatch, tmp_path):
+    from backtest import engine as E
+    from strategies import sticky_only
+
+    monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(E, "_plot_book_figures", lambda *args: None)
+    _save_equity(tmp_path, "research", sticky_only, {sticky_only.MAIN_BOOK: [1e7, 1.2e7]})
+
+    def run(module, partition, out, jobs):
+        assert module is None
+        path = out / partition / "equity_curves.csv"
+        path.parent.mkdir(parents=True)
+        pd.DataFrame({E.BENCHMARK_BOOK: [1e7, 1.1e7]}, index=pd.to_datetime(
+            ["2016-01-04", "2016-01-05"],
+        )).to_csv(path, index_label="date")
+
+    monkeypatch.setattr(E, "_run_partition", run)
+    result = E._evaluate_partition([sticky_only.STRATEGY_ID], "research", 1, reuse=True)
+    assert result.columns.tolist() == [sticky_only.MAIN_BOOK, E.BENCHMARK_BOOK]
 
 
 @pytest.mark.parametrize("partition,loader,fee,root", [
@@ -69,7 +121,7 @@ def test_sticky_chain_targets_only_need_net_share_and_chain_score(monkeypatch):
 ])
 def test_single_engine_routes_blend_to_the_requested_partition(monkeypatch, tmp_path, partition, loader, fee, root):
     from backtest import engine as E
-    from strategies import Targets, sticky_core as core, sticky_price_blend as blend
+    from strategies import Targets, sticky_price_blend as blend
 
     start = E.BACKTEST_START if partition == "research" else pd.Timestamp(E.C.OOS_START)
     dates = pd.bdate_range(start if partition == "research" else "2022-01-04", periods=2)
@@ -83,10 +135,10 @@ def test_single_engine_routes_blend_to_the_requested_partition(monkeypatch, tmp_
     monkeypatch.setattr(E.C, fee, fee_path)
     monkeypatch.setattr(E.C, root, tmp_path / partition)
     monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
-    _save_equity(tmp_path, partition, core, {core.MAIN_BOOK: [1e7, 1.2e7], E.BENCHMARK_BOOK: [1e7, 1.1e7]})
+    monkeypatch.setattr(E, "_benchmark_curve", lambda *args, **kwargs:
+                        pd.Series([1e7, 1.1e7], index=dates, name=E.BENCHMARK_BOOK))
 
-    def build_targets(data, daily_bars, lower, part, jobs, *, horizon):
-        assert horizon == blend.HORIZON
+    def build_targets(data, daily_bars, lower, part, jobs):
         assert data is panel
         assert daily_bars is bars
         assert (lower, part, jobs) == (start, partition, 2)
@@ -126,7 +178,7 @@ def test_combined_replaces_old_blend_and_plots_both_strategies_with_one_benchmar
         )
         savefig(figure, path, *args, **kwargs)
 
-    def run(module, partition, out, jobs, horizon=None):
+    def run(module, partition, out, jobs):
         calls.append((module, partition))
         _save_equity(tmp_path, partition, module, {module.MAIN_BOOK: [1e7, .9e7]})
 
@@ -169,7 +221,7 @@ def test_member_family_runs_oos_and_mirrors_the_price_family_layout(monkeypatch,
         titles[path.relative_to(tmp_path)] = [text.get_text() for text in figure.texts]
         savefig(figure, path, *args, **kwargs)
 
-    def run(module, partition, out, jobs, horizon=None):
+    def run(module, partition, out, jobs):
         calls.append((module, partition))
         _save_equity(tmp_path, partition, module, {module.MAIN_BOOK: [1e7, .9e7]})
 
@@ -211,6 +263,7 @@ def test_combined_single_strategy_leaves_family_outputs_alone(monkeypatch, tmp_p
 
 def test_all_books_generate_one_overview_and_summary(monkeypatch, tmp_path):
     from backtest import engine as E
+    from strategies import sticky_core
 
     monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
     monkeypatch.setattr(E, "_plot_book_figures", lambda *args: None)
@@ -221,7 +274,7 @@ def test_all_books_generate_one_overview_and_summary(monkeypatch, tmp_path):
         for module in modules:
             books.append(module.MAIN_BOOK)
             curves = {module.MAIN_BOOK: [1e7, 1.1e7]}
-            if module.STRATEGY_ID == E.BENCHMARK_SOURCE:
+            if module is sticky_core:
                 curves[E.BENCHMARK_BOOK] = [1e7, 1.05e7]
             for period in E.C.PARTITIONS:
                 _save_equity(tmp_path, period, module, curves)
@@ -240,41 +293,21 @@ def test_all_books_generate_one_overview_and_summary(monkeypatch, tmp_path):
     assert table.query("phase == 'oos'").net_ann.tolist() == pytest.approx([12.1] * len(books))
 
 
-def test_longer_horizon_is_a_separate_book_beside_the_current_one(monkeypatch, tmp_path):
+def test_every_book_holds_ten_days_and_the_engine_has_no_horizon_option():
     from backtest import engine as E
-    from strategies import sticky_core as core, sticky_only as only, sticky_chain as chain
 
-    assert E.book_label("sticky_only", 20) == "STICKY_ONLY_20D"
-    assert E.book_label("sticky_core", 20) == "STICKY_CORE_20D"
-    assert E.book_label("sticky_core", core.HORIZON) == core.MAIN_BOOK
-    monkeypatch.setattr(E.C, "strategy_dir", lambda name: tmp_path / name)
-    _save_equity(tmp_path, "research", core, {core.MAIN_BOOK: [1e7, 1.1e7], E.BENCHMARK_BOOK: [1e7, 1.05e7]})
-    calls = []
-
-    def run(module, partition, out, jobs, horizon):
-        calls.append((module, partition, out.name, horizon))
-        path = out / partition / module.EQUITY_CURVE_FILE
-        path.parent.mkdir(parents=True, exist_ok=True)
-        dates = pd.to_datetime(["2016-01-04", "2016-01-05"])
-        pd.DataFrame({E.book_label(module.STRATEGY_ID, horizon): [1e7, 1.3e7]}, index=dates).to_csv(
-            path, index_label="date")
-
-    monkeypatch.setattr(E, "_run_partition", run)
-    assert E.main(["--family", "member", "--horizon", "20", "--research"]) == 0
-
-    assert calls == [(only, "research", "sticky_only_hold20", 20), (chain, "research", "sticky_chain_hold20", 20)]
-    returns = pd.read_csv(tmp_path / "member" / "comparison_hold20" / "research" / "daily_returns.csv")
-    assert returns.columns.tolist() == ["date", "STICKY_ONLY_20D", chain.MAIN_BOOK + "_20D", E.BENCHMARK_BOOK]
-    assert not (tmp_path / "member" / "comparison").exists()
+    assert E.HORIZON == 10
+    with pytest.raises(SystemExit):
+        E.main(["--research", "--horizon", "20"])
 
 
 def test_price_core_is_a_research_only_control_scored_without_sticky():
     from backtest import engine as E
-    from strategies import price_core, sticky_core as core
+    from strategies import price_core
+    from strategies.common import RANKED_FACTORS, composite_score
 
-    assert price_core.SCORE_FACTORS == tuple(f for f in core.FACTORS if f != "STICKY_NET_SHARE")
-    assert (price_core.HORIZON, price_core.TARGET_MULTIPLIER, price_core.NAME_CAP) == (
-        core.HORIZON, core.TARGET_MULTIPLIER, core.NAME_CAP)
+    assert price_core.PRICE_FACTORS == tuple(f for f in RANKED_FACTORS if f != "STICKY_NET_SHARE")
+    assert E.CONTROL_IDS == {price_core.STRATEGY_ID}
     assert price_core.STRATEGY_ID not in {m.STRATEGY_ID for books in E.FAMILIES.values() for m in books}
     with pytest.raises(SystemExit):
         E.main(["price_core", "--oos"])
@@ -287,28 +320,29 @@ def test_price_core_is_a_research_only_control_scored_without_sticky():
         "NEG_SKEW_242": pd.DataFrame([[1.0, 2.0, 3.0]], index=day, columns=cols),
         "STICKY_NET_SHARE": pd.DataFrame([[3.0, 2.0, 1.0]], index=day, columns=cols),
     }
-    score = core.composite_score(values, candidates, price_core.SCORE_FACTORS).iloc[0]
+    score = composite_score(values, candidates, price_core.PRICE_FACTORS).iloc[0]
     assert score.tolist() == pytest.approx([1 / 3, 2 / 3, 1.0])
 
 
 def test_sticky_core_keeps_only_two_times_book():
-    from strategies.sticky_core import MAIN_BOOK, NAME_CAP, TARGET_MULTIPLIER
+    from strategies.common import NAME_CAP, TARGET_MULTIPLIER
+    from strategies.sticky_core import MAIN_BOOK
 
     assert (TARGET_MULTIPLIER, NAME_CAP) == (2.0, 0.20)
     assert MAIN_BOOK == "STICKY_CORE"
 
 
-def test_sticky_core_cohorts_average_daily_cross_sections():
-    from strategies.sticky_core import hold_cohorts
+def test_cohorts_average_daily_cross_sections():
+    from strategies.common import HORIZON, hold_cohorts
 
-    dates = pd.bdate_range("2021-12-01", periods=3)
-    weights = pd.DataFrame({"A": [0.5, -0.5, 0.0]}, index=dates)
-    held = hold_cohorts(weights, 2)
-    assert held["A"].tolist() == pytest.approx([0.25, 0.0, -0.25])
+    dates = pd.bdate_range("2021-12-01", periods=HORIZON + 1)
+    weights = pd.DataFrame({"A": [0.5, -0.5] + [0.0] * (HORIZON - 1)}, index=dates)
+    held = hold_cohorts(weights)
+    assert held["A"].tolist() == pytest.approx([0.05] + [0.0] * (HORIZON - 1) + [-0.05])
 
 
-def test_sticky_core_tails_allocate_equal_half_gross_per_leg():
-    from strategies.sticky_core import tail_weights
+def test_tails_allocate_equal_half_gross_per_leg():
+    from strategies.common import tail_weights
 
     days = pd.bdate_range("2020-01-01", periods=2)
     names = [f"S{i}" for i in range(10)]
@@ -323,23 +357,23 @@ def test_sticky_core_tails_allocate_equal_half_gross_per_leg():
     assert weights.loc[days[1]].eq(0).all()
 
 
-def test_sticky_core_score_ranks_only_candidates():
-    from strategies.sticky_core import FACTORS, composite_score
+def test_score_ranks_only_candidates():
+    from strategies.common import RANKED_FACTORS, composite_score
 
     day = pd.DatetimeIndex(["2020-01-02"])
     cols = list("ABCD")
     rising = pd.DataFrame([[1.0, 2.0, 3.0, 100.0]], index=day, columns=cols)
     falling = pd.DataFrame([[3.0, 2.0, 1.0, 100.0]], index=day, columns=cols)
     candidates = pd.DataFrame([[True, True, True, False]], index=day, columns=cols)
-    values = {FACTORS[0]: rising, FACTORS[1]: falling, FACTORS[2]: rising}
-    score = composite_score(values, candidates).iloc[0]
+    values = {RANKED_FACTORS[0]: rising, RANKED_FACTORS[1]: falling, RANKED_FACTORS[2]: rising}
+    score = composite_score(values, candidates, RANKED_FACTORS).iloc[0]
     assert score["A"] == pytest.approx((1 / 3 + 1 + 1 / 3) / 3)
     assert score["B"] == pytest.approx(2 / 3)
     assert np.isnan(score["D"])
 
 
-def test_sticky_core_cohorts_hold_ten_batches():
-    from strategies.sticky_core import HORIZON, hold_cohorts
+def test_cohorts_hold_ten_batches():
+    from strategies.common import HORIZON, hold_cohorts
 
     days = pd.bdate_range("2020-01-01", periods=HORIZON + 1)
     weights = pd.DataFrame({"A": [1.0] + [0.0] * HORIZON}, index=days)

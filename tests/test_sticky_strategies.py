@@ -22,9 +22,7 @@ def test_blend_nets_opposing_sleeves_without_restoring_target_gross():
     weights = blend_weights(sticky, sticky, -sticky, -sticky)
 
     assert weights.iloc[0].sum() == pytest.approx(0)
-    assert weights.iloc[0].abs().sum() == pytest.approx(0.5)
-    assert weights.loc[0, 18] == pytest.approx(.0625)
-    assert weights.loc[0, 0] == pytest.approx(-.0625)
+    assert weights.iloc[0].abs().sum() == pytest.approx(0)
 
 
 @pytest.mark.parametrize("invalid_factor", ["chain", "basis", "neg_skew"])
@@ -38,10 +36,14 @@ def test_price_blend_requires_only_its_signals_and_rechecks_pool_size(invalid_fa
     factors[invalid_factor].loc[1, 0] = np.nan
     weights = daily_target_weights(sticky, **factors)
 
-    assert weights.loc[0, 16] == pytest.approx(.1875)
-    assert weights.loc[0, 17] == pytest.approx(.1875)
-    assert weights.loc[0, 2] == pytest.approx(-.1875)
-    assert weights.loc[0, 3] == pytest.approx(-.1875)
+    assert weights.loc[0, 16] == pytest.approx(.125)
+    assert weights.loc[0, 17] == pytest.approx(.125)
+    assert weights.loc[0, 18] == pytest.approx(.125)
+    assert weights.loc[0, 19] == pytest.approx(.125)
+    assert weights.loc[0, 0] == pytest.approx(-.125)
+    assert weights.loc[0, 1] == pytest.approx(-.125)
+    assert weights.loc[0, 2] == pytest.approx(-.125)
+    assert weights.loc[0, 3] == pytest.approx(-.125)
     assert weights.loc[1].eq(0).all()
 
 
@@ -60,6 +62,8 @@ def test_sticky_chain_targets_only_need_net_share_and_chain_score(monkeypatch):
     targets = sticky_chain.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "research", 1)
 
     assert targets.weights.iloc[0].abs().sum() * HORIZON == pytest.approx(1)
+    assert targets.weights.iloc[0].gt(0).sum() == 2
+    assert targets.weights.iloc[0].lt(0).sum() == 2
     assert targets.weights.iloc[1].equals(targets.weights.iloc[0])
     assert targets.dominant is dominant
 
@@ -88,8 +92,8 @@ def test_sticky_only_targets_need_no_flow_file(monkeypatch, tmp_path, partition,
 
     targets = sticky_only.build_targets(panel, pd.DataFrame(), start, partition, 1)
     fresh = targets.weights.iloc[0] * HORIZON
-    assert fresh[fresh.gt(0)].index.tolist() == names[-2:]
-    assert fresh[fresh.lt(0)].index.tolist() == names[:2]
+    assert fresh[fresh.gt(0)].index.tolist() == names[-1:]
+    assert fresh[fresh.lt(0)].index.tolist() == names[:1]
     assert fresh.abs().sum() == pytest.approx(1.0)
     assert targets.dominant.loc[dates[0], names[-1]] == names[-1] + "0001"
 
@@ -350,11 +354,24 @@ def test_tails_allocate_equal_half_gross_per_leg():
     score.iloc[1, 3:] = np.nan
     weights = tail_weights(score)
     row = weights.loc[days[0]]
-    assert row["S9"] == pytest.approx(0.25) and row["S8"] == pytest.approx(0.25)
-    assert row["S0"] == pytest.approx(-0.25) and row["S1"] == pytest.approx(-0.25)
+    assert row["S9"] == pytest.approx(0.5)
+    assert row["S0"] == pytest.approx(-0.5)
     assert row.sum() == pytest.approx(0.0)
     assert row.abs().sum() == pytest.approx(1.0)
     assert weights.loc[days[1]].eq(0).all()
+
+
+def test_tail_weights_defaults_to_ten_percent_and_allows_overrides():
+    from strategies.common import tail_weights
+
+    score = pd.DataFrame([range(20)], columns=range(20), dtype=float)
+    default = tail_weights(score).iloc[0]
+    twenty_percent = tail_weights(score, tail_share=0.20).iloc[0]
+
+    assert default.gt(0).sum() == 2
+    assert default.lt(0).sum() == 2
+    assert twenty_percent.gt(0).sum() == 4
+    assert twenty_percent.lt(0).sum() == 4
 
 
 def test_score_ranks_only_candidates():

@@ -10,7 +10,7 @@ from research.xs_robustness import load_price_factors
 from strategies import Targets
 
 HORIZON = 10
-TAIL_SHARE = 0.20
+TAIL_SHARE = 0.10
 MIN_NAMES = 8
 TARGET_MULTIPLIER = 2.0
 NAME_CAP = 0.20
@@ -32,20 +32,33 @@ def equal_leg_weights(long_sel: pd.DataFrame, short_sel: pd.DataFrame) -> pd.Dat
     return (wl + ws).where(long_sel.any(axis=1) & short_sel.any(axis=1), 0.0)
 
 
-def tail_weights(score: pd.DataFrame) -> pd.DataFrame:
-    """候选至少 8 个时，按固定品种顺序处理同分，两端各取 20%。"""
+def tail_weights(score: pd.DataFrame, tail_share: float = TAIL_SHARE) -> pd.DataFrame:
+    """候选至少 8 个时，按固定品种顺序处理同分，两端各取 tail_share。"""
     n = score.notna().sum(axis=1)
-    k = np.ceil(n * TAIL_SHARE)
+    k = np.ceil(n * tail_share)
     long = score.rank(axis=1, ascending=False, method="first").le(k, axis=0).where(n.ge(MIN_NAMES), False)
     short = score.rank(axis=1, method="first").le(k, axis=0).where(n.ge(MIN_NAMES), False)
     return equal_leg_weights(long, short)
 
 
-def confirmed_weights(sticky: pd.DataFrame, residual: pd.DataFrame) -> pd.DataFrame:
+def confirmed_weights(sticky: pd.DataFrame, residual: pd.DataFrame,
+                      tail_share: float | None = None) -> pd.DataFrame:
     """在粘性净多两端分别取一致性残差最高和最低的一半。"""
     buckets = sticky_quintiles(sticky)
-    long, _ = ranked_halves(residual, buckets.eq(5))
-    _, short = ranked_halves(residual, buckets.eq(1))
+    if tail_share is None:
+        long, _ = ranked_halves(residual, buckets.eq(5))
+        _, short = ranked_halves(residual, buckets.eq(1))
+    else:
+        n = sticky.notna().sum(axis=1)
+        k = np.ceil(n * tail_share)
+        rank = sticky.rank(axis=1, method="first")
+        eligible = buckets.notna().any(axis=1).to_numpy()[:, None]
+        long_pool = rank.gt(n - 2 * k, axis=0) & eligible
+        short_pool = rank.le(2 * k, axis=0) & eligible
+        long_rank = residual.where(long_pool).rank(axis=1, ascending=False, method="first")
+        short_rank = residual.where(short_pool).rank(axis=1, method="first")
+        long = long_pool & long_rank.le(k, axis=0)
+        short = short_pool & short_rank.le(k, axis=0)
     return equal_leg_weights(long, short)
 
 

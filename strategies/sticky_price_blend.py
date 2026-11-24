@@ -7,6 +7,7 @@ from research.xs_robustness import load_price_factors
 from strategies import Targets
 from strategies.common import confirmed_weights, hold_cohorts, tail_weights
 
+TAIL_SHARE = 0.10
 STRATEGY_ID = "sticky_price_blend"
 MAIN_BOOK = "STICKY_PRICE_BLEND_RESIDUAL"
 EQUITY_CURVE_FILE = "equity_curves.csv"
@@ -15,9 +16,9 @@ EQUITY_CURVE_FILE = "equity_curves.csv"
 def blend_weights(sticky, residual, basis, neg_skew) -> pd.DataFrame:
     """在共同池选样，保留两套目标权重相抵后的净额。"""
     common = residual.notna()
-    holding_weights = confirmed_weights(sticky.where(common), residual)
+    holding_weights = confirmed_weights(sticky.where(common), residual, tail_share=TAIL_SHARE)
     price_score = (basis.where(common).rank(axis=1, pct=True) + neg_skew.where(common).rank(axis=1, pct=True)) / 2
-    return (holding_weights + tail_weights(price_score)) / 2
+    return (holding_weights + tail_weights(price_score, tail_share=TAIL_SHARE)) / 2
 
 
 def daily_target_weights(sticky, basis, neg_skew, chain) -> pd.DataFrame:

@@ -408,3 +408,21 @@ def test_chain_share_uses_only_sticky_members_with_same_direction_on_another_pro
     result = chain_consistent_share(net, gross, sticky, oi, ["A", "B"])
     assert result["A"].iloc[0] == pytest.approx(0.6)
     assert result["B"].iloc[0] == pytest.approx(0.2)
+
+
+def test_sticky_core_correlation_uses_common_valid_candidates_and_saves_heatmap(tmp_path):
+    from research.xs_robustness import sticky_core_correlation
+
+    days = pd.bdate_range("2018-12-31", periods=2)
+    cols = [f"S{i}" for i in range(9)]
+    base = np.arange(8.0)
+    factors = {
+        "BASIS_MOM_242": pd.DataFrame([[*base, np.nan], [*base, 100.0]], index=days, columns=cols),
+        "NEG_SKEW_242": pd.DataFrame([[*(-base), np.nan], [*(-base), np.nan]], index=days, columns=cols),
+        "STICKY_NET_SHARE": pd.DataFrame([[*base, 50.0], [*base, 50.0]], index=days, columns=cols),
+    }
+    corr = sticky_core_correlation(factors, tmp_path)
+    assert corr.loc["BASIS_MOM_242", "STICKY_NET_SHARE"] == pytest.approx(1.0)
+    assert corr.loc["BASIS_MOM_242", "NEG_SKEW_242"] == pytest.approx(-1.0)
+    assert (tmp_path / "sticky_core_factor_correlation.csv").is_file()
+    assert (tmp_path / "sticky_core_factor_correlation.png").is_file()

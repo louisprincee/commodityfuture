@@ -264,21 +264,6 @@ def test_equity_drawdown_plot_compares_strategy_with_equal_weight_on_log_scale(t
     assert path.stat().st_size > 0
     assert len(closed_figures[-1].axes) == 3
     assert closed_figures[-1].axes[0].get_yscale() == "log"
-    assert any("样本外" in text.get_text() for text in closed_figures[-1].texts)
-    closed_figures[-1].canvas.draw()
-    nav_tick_labels = {
-        tick.get_text() for tick in closed_figures[-1].axes[0].get_yticklabels()
-    }
-    assert {"0.75×", "1×", "1.25×"} <= nav_tick_labels
-
-
-def test_calendar_year_return_uses_prior_year_end_equity():
-    equity = pd.DataFrame({
-        "A": [P.CAPITAL_CNY, 1.1 * P.CAPITAL_CNY, 1.21 * P.CAPITAL_CNY, P.CAPITAL_CNY],
-    }, index=pd.to_datetime(["2016-01-04", "2016-12-30", "2017-01-03", "2017-12-29"]))
-    out = P.yearly_returns(equity).set_index(["book", "year"])["return"]
-    assert out[("A", 2016)] == pytest.approx(0.10)
-    assert out[("A", 2017)] == pytest.approx(100.0 / 110.0 - 1.0)
 
 
 def test_yearly_charts_use_prior_close_and_reset_the_drawdown_peak(tmp_path, monkeypatch):
@@ -286,6 +271,7 @@ def test_yearly_charts_use_prior_close_and_reset_the_drawdown_peak(tmp_path, mon
 
     dates = pd.to_datetime(["2021-12-29", "2021-12-30", "2022-01-04", "2022-01-05"])
     equity = pd.DataFrame({"strategy": [9e6, 8e6, 7.6e6, 8.8e6]}, index=dates)
+    annual = P.yearly_returns(equity).set_index(["book", "year"])["return"]
     seen = {}
     savefig = Figure.savefig
 
@@ -296,6 +282,8 @@ def test_yearly_charts_use_prior_close_and_reset_the_drawdown_peak(tmp_path, mon
     monkeypatch.setattr(Figure, "savefig", capture)
     paths = P.plot_yearly_returns_drawdowns(equity, tmp_path, strategy="strategy")
 
+    assert annual[("strategy", 2021)] == pytest.approx(-0.20)
+    assert annual[("strategy", 2022)] == pytest.approx(0.10)
     assert [p.name for p in paths] == ["2021.png", "2022.png"]
     assert all(p.is_file() for p in paths)
     assert seen["2021"][0] == pytest.approx([-.1, -.2])

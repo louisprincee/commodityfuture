@@ -255,6 +255,77 @@ def build_inputs(member_path: Path):
     return scores, labels, states, seat_scores
 
 
+def sticky_core_correlation(factors: dict[str, pd.DataFrame], out: Path) -> pd.DataFrame:
+    """在三因子共同有效候选集上计算研究期截面 Spearman 秩相关矩阵并绘制热力图。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+
+    keys = ("BASIS_MOM_242", "NEG_SKEW_242", "STICKY_NET_SHARE")
+    y_labels = ["基差动量\nBASIS_MOM_242", "负向偏度\nNEG_SKEW_242", "粘性净多\nSTICKY_NET_SHARE"]
+    x_labels = ["基差动量\n(BASIS_MOM)", "负向偏度\n(NEG_SKEW)", "粘性净多\n(STICKY)"]
+    common = next(iter(factors.values())).notna()
+    for key in keys:
+        common &= factors[key].notna()
+    masked = {key: factors[key].where(common) for key in keys}
+
+    corr = pd.DataFrame(1.0, index=list(keys), columns=list(keys))
+    sub_rows = []
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            a, b = keys[i], keys[j]
+            ic, _ = _rank_corr(masked[a], masked[b], MIN_NAMES)
+            val = float(ic.mean())
+            corr.loc[a, b] = corr.loc[b, a] = val
+            sub_rows.append(dict(
+                factor_a=a, factor_b=b,
+                corr_2016_2021=val,
+                corr_2016_2018=float(ic.loc[:"2018"].mean()),
+                corr_2019_2021=float(ic.loc["2019":].mean()),
+                positive_fraction=float(ic.dropna().gt(0).mean()),
+                days=int(ic.count()),
+            ))
+
+    out.mkdir(parents=True, exist_ok=True)
+    corr.to_csv(out / "sticky_core_factor_correlation.csv")
+    pd.DataFrame(sub_rows).to_csv(out / "sticky_core_factor_correlation_summary.csv", index=False)
+
+    cmap = LinearSegmentedColormap.from_list("corr_div", ["#D18B38", "#F8FAFB", "#147D89"])
+    with plt.rc_context({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Heiti SC", "Arial Unicode MS", "DejaVu Sans"],
+        "axes.unicode_minus": False,
+        "text.color": "#293e4c",
+    }):
+        fig, ax = plt.subplots(figsize=(7.6, 5.6), dpi=200)
+        mat = corr.to_numpy(dtype=float)
+        im = ax.imshow(mat, cmap=cmap, vmin=-1.0, vmax=1.0, aspect="equal")
+        ax.set_xticks(range(len(keys)), x_labels, fontsize=10)
+        ax.set_yticks(range(len(keys)), y_labels, fontsize=10)
+        ax.tick_params(length=0, pad=10)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        for i in range(len(keys)):
+            for j in range(len(keys)):
+                v = mat[i, j]
+                txt_color = "#FFFFFF" if abs(v) > 0.55 else "#293e4c"
+                ax.text(j, i, f"{v:+.3f}" if i != j else "1.000", ha="center", va="center",
+                        fontsize=13, fontweight="bold", color=txt_color)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.042, pad=0.06)
+        cbar.outline.set_visible(False)
+        cbar.set_ticks([-1.0, -0.5, 0.0, 0.5, 1.0])
+        cbar.ax.tick_params(labelsize=9.5, colors="#5c6d79")
+        fig.text(0.06, 0.935, "STICKY_CORE 核心三因子截面秩相关性热力图",
+                 fontsize=15, fontweight="bold", color="#293e4c")
+        fig.text(0.06, 0.892, "研究期（2016–2021）共同有效候选池每日 Spearman 秩相关均值",
+                 fontsize=10.5, color="#697c89")
+        fig.subplots_adjust(left=0.25, right=0.88, top=0.83, bottom=0.14)
+        fig.savefig(out / "sticky_core_factor_correlation.png", dpi=200, facecolor="#ffffff")
+        plt.close(fig)
+    return corr
+
+
 def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     member_path = member_path or C.study_dir("member_ic") / "daily_factors_and_returns.csv"
     C.assert_research_only(member_path)
@@ -292,6 +363,11 @@ def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     )
 
     out.mkdir(parents=True, exist_ok=True)
+    sticky_core_correlation({
+        "BASIS_MOM_242": scores["BASIS_MOM_242"],
+        "NEG_SKEW_242": scores["SKEW_242"],
+        "STICKY_NET_SHARE": seat_scores["STICKY_NET_SHARE"],
+    }, out)
     result.to_csv(out / "factor_horizons.csv", index=False)
     yearly.to_csv(out / "ic_by_year.csv", index=False)
     legs_yearly.to_csv(out / "legs_by_year.csv", index=False)

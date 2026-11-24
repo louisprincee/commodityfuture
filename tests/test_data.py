@@ -8,24 +8,24 @@ import config as C
 import data as D
 
 
-def test_research_guard_rejects_oos_paths():
-    with pytest.raises(C.HoldoutViolation):
-        C.assert_research_only(C.daily_dir("oos") / "contracts" / "CU2201.pkl")
-    with pytest.raises(C.HoldoutViolation):
-        C.assert_research_only(C.minute_dir("oos") / "CU.parquet")
-    C.assert_research_only(C.daily_dir("research") / "contracts" / "CU2101.pkl")
-
-
-def test_partition_layout_seals_complete_oos_and_archive_roots():
+def test_partition_guards_seal_paths_and_dates():
     assert C.daily_dir("research") == C.DATA_ROOT / "research" / "daily"
     assert C.minute_dir("oos") == C.DATA_ROOT / "oos" / "minute"
     assert C.RESEARCH_FEE_PATH == C.DATA_ROOT / "research" / "execution" / "fee_history.csv"
     first, last = pd.Timestamp("2021-12-31").date(), pd.Timestamp("2022-01-04").date()
     assert C.split_period(first, last) == [("research", first, C.RESEARCH_END), ("oos", C.OOS_START, last)]
+    C.assert_research_only(C.daily_dir("research") / "contracts" / "CU2101.pkl")
+    C.assert_no_holdout_dates(pd.to_datetime(["2021-12-31"]))
+    with pytest.raises(C.HoldoutViolation):
+        C.assert_research_only(C.daily_dir("oos") / "contracts" / "CU2201.pkl")
+    with pytest.raises(C.HoldoutViolation):
+        C.assert_research_only(C.minute_dir("oos") / "CU.parquet")
     with pytest.raises(C.HoldoutViolation):
         C.assert_research_only(C.DATA_ROOT / "oos" / "future_dataset" / "A.parquet")
     with pytest.raises(C.HoldoutViolation):
         C.assert_research_only(C.ARCHIVE_DIR / "minute" / "A.parquet")
+    with pytest.raises(C.HoldoutViolation):
+        C.assert_no_holdout_dates(pd.to_datetime(["2022-01-04"]))
 
 
 def test_minute_merge_uses_trading_dates_and_preserves_legacy_columns(tmp_path):
@@ -58,12 +58,6 @@ def test_minute_merge_uses_trading_dates_and_preserves_legacy_columns(tmp_path):
     oos_path = tmp_path / "oos" / "A.parquet"
     write_shard(oos_path, "oos", cross)
     assert pd.read_parquet(oos_path).loc[cross.index[0], "trading_date"] == pd.Timestamp("2022-01-04")
-
-
-def test_holdout_date_guard():
-    C.assert_no_holdout_dates(pd.to_datetime(["2021-12-31"]))
-    with pytest.raises(C.HoldoutViolation):
-        C.assert_no_holdout_dates(pd.to_datetime(["2022-01-04"]))
 
 
 def test_partial_fee_refresh_keeps_dates_the_vendor_did_not_return(tmp_path):

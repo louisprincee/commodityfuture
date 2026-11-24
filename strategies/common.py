@@ -14,15 +14,16 @@ TAIL_SHARE = 0.10
 MIN_NAMES = 8
 TARGET_MULTIPLIER = 2.0
 NAME_CAP = 0.20
-PRICE_FACTORS = ("BASIS_MOM_242", "NEG_SKEW_242")
-RANKED_FACTORS = (*PRICE_FACTORS, "STICKY_NET_SHARE")
+RANKED_FACTORS = ("BASIS_MOM_242", "NEG_SKEW_242", "STICKY_NET_SHARE")
 
 
 def composite_score(factors: dict[str, pd.DataFrame], candidates: pd.DataFrame,
                     names: tuple[str, ...]) -> pd.DataFrame:
     """仅在候选池内计算截面百分位秩，再等权平均。"""
-    ranked = [factors[name].where(candidates).rank(axis=1, pct=True) for name in names]
-    return pd.concat(ranked).groupby(level=0).mean().where(candidates)
+    if not names:
+        raise ValueError("合成因子不能为空")
+    ranked = [factors[name].where(candidates).rank(axis=1, pct=True).mul(1.0 / len(names)) for name in names]
+    return pd.concat(ranked).groupby(level=0).sum().where(candidates)
 
 
 def equal_leg_weights(long_sel: pd.DataFrame, short_sel: pd.DataFrame) -> pd.DataFrame:
@@ -74,7 +75,7 @@ def _sticky_series(symbol: str, market: pd.DataFrame, partition: str) -> pd.Seri
 
 def ranked_targets(panel: pd.DataFrame, start: pd.Timestamp, partition: str, jobs: int,
                    score_factors: tuple[str, ...]) -> Targets:
-    """用同一流动性池及三因子有效性构建两套可比的截面排序目标。"""
+    """在流动性池及三因子均有效的品种内构建等权截面排序目标。"""
     eligible, dominant = D.member_universe(panel, start, partition)
     if len(eligible.columns) < 10:
         raise RuntimeError("评价区间没有足够的流动性品种及会员排名")

@@ -26,7 +26,7 @@ import config as C  # noqa: E402
 import data as D  # noqa: E402
 from costs import load_market  # noqa: E402
 from research.settings import XS_POSITION  # noqa: E402
-from strategies import Targets, price_core, sticky_chain, sticky_core, sticky_only, sticky_price_blend  # noqa: E402
+from strategies import Targets, sticky_chain, sticky_core, sticky_only  # noqa: E402
 from strategies.common import HORIZON, NAME_CAP, TARGET_MULTIPLIER  # noqa: E402
 
 CAPITAL_CNY = 10_000_000
@@ -578,19 +578,15 @@ def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str
 # 所有策略固定 10 日重叠持有。
 FAMILIES = {
     "member": (sticky_only, sticky_chain),
-    "member_price": (sticky_core, sticky_price_blend),
+    "member_price": (sticky_core,),
 }
 FAMILY_TITLES = {
     "member": "会员持仓因子 · 商品期货截面策略",
     "member_price": "会员持仓因子 · 价格因子 · 商品期货截面策略",
 }
-# 研究对照只运行研究期，不进入类别对照图，也不随默认命令读取样本外。
-RESEARCH_CONTROLS = {"member_price": (price_core,)}
-MODULES = {module.STRATEGY_ID: module
-           for registry in (FAMILIES, RESEARCH_CONTROLS) for books in registry.values() for module in books}
+MODULES = {module.STRATEGY_ID: module for books in FAMILIES.values() for module in books}
 FAMILY_OF = {module.STRATEGY_ID: family
-             for registry in (FAMILIES, RESEARCH_CONTROLS) for family, books in registry.items() for module in books}
-CONTROL_IDS = {module.STRATEGY_ID for books in RESEARCH_CONTROLS.values() for module in books}
+             for family, books in FAMILIES.items() for module in books}
 PERIOD_LABELS = {"research": "研究期", "oos": "样本外"}
 
 
@@ -768,8 +764,6 @@ def main(argv: list[str]) -> int:
         if partition is None:
             allowed = "、".join(f"{start}–{end}" for start, end in windows)
             parser.error(f"可用回测区间为 {allowed}")
-    if args.strategy in CONTROL_IDS and partition != "research":
-        parser.error(f"{args.strategy} 是研究对照，只能运行研究期")
     if args.strategy and args.family and FAMILY_OF[args.strategy] != args.family:
         parser.error(f"{args.strategy} 不属于 {args.family}")
 

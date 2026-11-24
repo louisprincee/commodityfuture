@@ -16,7 +16,7 @@ from strategies.common import RANKED_FACTORS, ranked_targets
 
 STRATEGY_ID = "sticky_core"
 MAIN_BOOK = "STICKY_CORE"
-EQUITY_CURVE_FILE = "equity_curves_d0_t1.csv"
+EQUITY_CURVE_FILE = "equity_curves.csv"
 
 
 def build_targets(panel: pd.DataFrame, _bars: pd.DataFrame, start: pd.Timestamp,

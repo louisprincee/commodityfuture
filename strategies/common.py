@@ -5,8 +5,8 @@ from joblib import Parallel, delayed
 
 import data as D
 from research.factors import member_tables, sticky_net_share
-from research.member_complementarity import ranked_halves, sticky_quintiles
-from research.xs_robustness import load_price_factors
+from research.member.complementarity import ranked_halves, sticky_quintiles
+from research.factors.price import load_price_factors
 from strategies import Targets
 
 HORIZON = 10
@@ -63,9 +63,9 @@ def confirmed_weights(sticky: pd.DataFrame, residual: pd.DataFrame,
     return equal_leg_weights(long, short)
 
 
-def hold_cohorts(weights: pd.DataFrame) -> pd.DataFrame:
-    """每日新开权重持有 10 日，汇总为当期目标权重。"""
-    return sum(weights.shift(lag, fill_value=0.0) for lag in range(HORIZON)) / HORIZON
+def hold_cohorts(weights: pd.DataFrame, horizon: int = HORIZON) -> pd.DataFrame:
+    """每日新开权重持有 horizon 日（默认 10 日），汇总为当期目标权重。"""
+    return sum(weights.shift(lag, fill_value=0.0) for lag in range(horizon)) / horizon
 
 
 def _sticky_series(symbol: str, market: pd.DataFrame, partition: str) -> pd.Series:
@@ -74,7 +74,7 @@ def _sticky_series(symbol: str, market: pd.DataFrame, partition: str) -> pd.Seri
 
 
 def ranked_targets(panel: pd.DataFrame, start: pd.Timestamp, partition: str, jobs: int,
-                   score_factors: tuple[str, ...]) -> Targets:
+                   score_factors: tuple[str, ...], horizon: int = HORIZON) -> Targets:
     """在流动性池及三因子均有效的品种内构建等权截面排序目标。"""
     eligible, dominant = D.member_universe(panel, start, partition)
     if len(eligible.columns) < 10:
@@ -105,4 +105,4 @@ def ranked_targets(panel: pd.DataFrame, start: pd.Timestamp, partition: str, job
         "short_slots_per_day": fresh.lt(0).sum(axis=1).mean(),
         "fresh_gross_per_day": fresh.abs().sum(axis=1).mean(),
     }])
-    return Targets(hold_cohorts(fresh), dominant, selection=selection)
+    return Targets(hold_cohorts(fresh, horizon), dominant, selection=selection)

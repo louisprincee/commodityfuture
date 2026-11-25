@@ -1,7 +1,7 @@
 """粘性净多两端各取 20% 候选，再用跨品种一致性残差筛到约 10%。"""
 import pandas as pd
 
-from research.member_behavior import load_chain_inputs, residual_scores
+from research.member.chain import load_chain_inputs, residual_scores
 from strategies import Targets
 from strategies.common import confirmed_weights, hold_cohorts
 

@@ -24,7 +24,7 @@ def member_tables(symbol: str, dates: pd.DatetimeIndex, *, top20: bool = False,
     if partition == "research":
         ranks = D.load_member_rank(symbol, "research")
         C.assert_no_holdout_dates(ranks["trading_date"], f"{symbol} 会员排名")
-    elif partition == "oos":
+    elif partition in ("oos", "combined"):
         ranks = D.load_member_rank_span(symbol)
     else:
         raise ValueError(f"未知分区 {partition}")

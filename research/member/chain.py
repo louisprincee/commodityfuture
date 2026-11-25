@@ -12,8 +12,8 @@ from joblib import Parallel, delayed
 import config as C
 import data as D
 from research.factors import member_tables, seat_turnover_groups
-from research.ic_study import _rank_corr, forward_returns, return_matrix
-from research.xs_robustness import MIN_NAMES, START, hac_t
+from research.ic.study import _rank_corr, forward_returns, return_matrix
+from research.ic.robustness import MIN_NAMES, START, hac_t
 
 
 def masked_net_share(net: pd.DataFrame, gross: pd.DataFrame, mask: pd.DataFrame) -> pd.Series:
@@ -77,6 +77,8 @@ def load_chain_inputs(panel: pd.DataFrame, jobs: int, *, partition: str = "resea
     elif partition == "oos":
         start = pd.Timestamp(C.OOS_START)
         C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "跨品种一致性样本外日面板")
+    elif partition == "combined":
+        start = START
     else:
         raise ValueError(f"未知分区 {partition}")
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
@@ -85,11 +87,9 @@ def load_chain_inputs(panel: pd.DataFrame, jobs: int, *, partition: str = "resea
     def wide(name: str) -> pd.DataFrame:
         return panel.pivot(index="date", columns="symbol", values=name)
 
-    root = C.daily_dir(partition) / "member_rank"
-    if partition == "research":
-        C.assert_research_only(root)
     eligible = wide("eligible").eq(True)
-    ranked = [symbol for symbol in eligible if (root / f"{symbol}_long.pkl").is_file()]
+    available = D.symbols_with_member_rank(partition)
+    ranked = [symbol for symbol in eligible if symbol in available]
     dates = eligible.index
     volume, oi = wide("volume_total"), wide("oi_total")
     states = Parallel(n_jobs=jobs, prefer="threads")(

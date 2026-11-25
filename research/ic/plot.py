@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 import config as C
-from research.ic_study import _bh
+from research.ic.study import _bh
 
 
 def _binomial_upper_tail(successes: int, trials: int) -> float:

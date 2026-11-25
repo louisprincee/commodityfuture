@@ -5,16 +5,16 @@ import pytest
 
 def test_active_strategy_families_and_equal_weight_composite():
     from backtest import engine as E
-    from strategies import sticky_chain, sticky_core, sticky_only
+    from strategies import sticky_chain, sticky_core, sticky_core_h20, sticky_only
     from strategies.common import composite_score
 
     assert E.FAMILIES == {
         "member": (sticky_only, sticky_chain),
-        "member_price": (sticky_core,),
+        "member_price": (sticky_core, sticky_core_h20),
     }
     assert {
         module.STRATEGY_ID for family in E.FAMILIES.values() for module in family
-    } == {"sticky_only", "sticky_chain", "sticky_core"}
+    } == {"sticky_only", "sticky_chain", "sticky_core", "sticky_core_h20"}
 
     candidates = pd.DataFrame([[True, True, True, False]], columns=list("ABCD"))
     factors = {
@@ -58,7 +58,7 @@ def test_sticky_chain_targets_only_need_net_share_and_chain_score(monkeypatch):
 
 @pytest.mark.parametrize("partition,start", [("research", "2016-01-04"), ("oos", "2022-01-01")])
 def test_sticky_only_targets_need_no_flow_file(monkeypatch, tmp_path, partition, start):
-    from research import member_complementarity as M
+    from research.member import complementarity as M
     from strategies import sticky_only
     from strategies.common import HORIZON
 
@@ -106,3 +106,17 @@ def test_ten_day_cohorts_average_and_expire():
     assert held["A"].iloc[HORIZON] == pytest.approx(-0.05)
     assert held["B"].iloc[:HORIZON].eq(0.1).all()
     assert held["B"].iloc[HORIZON] == 0
+
+
+def test_hold_cohorts_accepts_twenty_day_horizon():
+    from strategies.common import hold_cohorts
+    from strategies.sticky_core_h20 import HOLD
+
+    days = pd.bdate_range("2020-01-01", periods=HOLD + 1)
+    weights = pd.DataFrame({"A": [1.0] + [0.0] * HOLD}, index=days)
+    held = hold_cohorts(weights, HOLD)
+    assert HOLD == 20
+    assert held["A"].iloc[:HOLD].eq(0.05).all()
+    assert held["A"].iloc[HOLD] == 0
+
+

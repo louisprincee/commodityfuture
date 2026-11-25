@@ -9,7 +9,7 @@ from scipy.stats import binomtest
 
 import config as C
 import data as D
-from research.ic_study import (
+from research.ic.study import (
     MIN_DAYS,
     _bh,
     _rank_corr,
@@ -22,10 +22,18 @@ from research.settings import XS_POSITION as XS
 FACTORS = ("ROLL_YIELD", "MOM_12_1", "WAREHOUSE_DRAW_20")
 
 
+MOM_LOOKBACK, MOM_SKIP = 242, 21
+
+
 def momentum_12_1(returns: pd.Series) -> pd.Series:
-    """过去 242 个交易日复合收益，跳过最近 21 个交易日。"""
+    """12-1 月动量：t-241..t-21 共 221 个交易日的复合收益，即过去 12 个月跳过最近 1 个月。
+
+    2026-11-25 更正：此前窗口为 t-262..t-21（242 日再跳 21 日，实为 13-1 月），与因子名和
+    Asness, Moskowitz & Pedersen (2013) 不符。更正在看过研究期结果之后，按新规格单独报告。
+    """
     gross = 1.0 + returns.replace([np.inf, -np.inf], np.nan)
-    return gross.shift(21).rolling(242, min_periods=242).apply(np.prod, raw=True) - 1.0
+    window = MOM_LOOKBACK - MOM_SKIP
+    return gross.shift(MOM_SKIP).rolling(window, min_periods=window).apply(np.prod, raw=True) - 1.0
 
 
 def warehouse_draw_20(stock: pd.Series, open_interest: pd.Series) -> pd.Series:

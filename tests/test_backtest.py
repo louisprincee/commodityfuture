@@ -238,55 +238,81 @@ def test_simulate_margin_cap():
         simulate(weights, contracts, market, dates[0], margin_cap=1.2)
 
 
-def test_equity_drawdown_plot_compares_strategy_with_equal_weight_on_log_scale(tmp_path, monkeypatch):
-    import matplotlib.pyplot as plt
+def test_continuous_dates_cover_both_partitions():
+    dates = pd.bdate_range("2016-01-04", "2025-12-31")
+    P._assert_continuous_dates(dates, "账本")
+    with pytest.raises(ValueError):
+        P._assert_continuous_dates(pd.bdate_range("2016-01-04", "2021-12-31"), "账本")
 
-    dates = pd.bdate_range("2021-12-27", periods=4)
+
+def test_overview_sharpe_can_come_from_separate_runs(tmp_path, monkeypatch):
+    from matplotlib import pyplot as plt
+
+    dates = pd.bdate_range("2021-12-01", "2022-02-01")
     equity = pd.DataFrame({
-        "strategy": [10_000_000, 12_400_000, 6_000_000, 10_500_000],
-        "benchmark": [10_000_000, 10_500_000, 10_300_000, 11_000_000],
+        "strategy": np.linspace(P.CAPITAL_CNY, P.CAPITAL_CNY * 1.1, len(dates)),
+        "benchmark": np.linspace(P.CAPITAL_CNY, P.CAPITAL_CNY * 1.05, len(dates)),
     }, index=dates)
-    closed_figures = []
+    closed = []
     close = plt.close
 
-    def capture_figure(*args, **kwargs):
-        closed_figures.append(plt.gcf())
+    def capture(*args, **kwargs):
+        closed.append(plt.gcf())
         close(*args, **kwargs)
 
-    monkeypatch.setattr(plt, "close", capture_figure)
-
-    path = P.plot_equity_drawdown(
-        equity, tmp_path / "performance.png", strategies=["strategy"], benchmark="benchmark",
-        period_label="样本外",
+    monkeypatch.setattr(plt, "close", capture)
+    P.plot_equity_drawdown(
+        equity, tmp_path / "overview.png", strategies=["strategy"], benchmark="benchmark",
+        research_sharpe=pd.Series({"strategy": 1.5, "benchmark": 0.2}),
+        oos_sharpe=pd.Series({"strategy": 0.4, "benchmark": 0.1}),
     )
-
-    assert path.is_file()
-    assert path.stat().st_size > 0
-    assert len(closed_figures[-1].axes) == 3
-    assert closed_figures[-1].axes[0].get_yscale() == "log"
+    texts = [text.get_text() for text in closed[-1].texts]
+    assert "1.500" in texts
+    assert "0.400" in texts
 
 
-def test_yearly_charts_use_prior_close_and_reset_the_drawdown_peak(tmp_path, monkeypatch):
-    from matplotlib.figure import Figure
+def test_combined_price_factors_accept_dates_around_the_split():
+    from research.factors.price import load_price_factors
 
-    dates = pd.to_datetime(["2021-12-29", "2021-12-30", "2022-01-04", "2022-01-05"])
-    equity = pd.DataFrame({"strategy": [9e6, 8e6, 7.6e6, 8.8e6]}, index=dates)
-    annual = P.yearly_returns(equity).set_index(["book", "year"])["return"]
-    seen = {}
-    savefig = Figure.savefig
+    dates = pd.bdate_range("2021-11-01", periods=40)
+    panel = pd.DataFrame({
+        "date": list(dates) * 2,
+        "symbol": ["RB"] * len(dates) + ["HC"] * len(dates),
+        "ret1": 0.001,
+        "ret2": 0.0,
+    })
+    index = dates[dates >= "2021-12-15"]
+    basis, skew = load_price_factors(index, pd.Index(["RB", "HC"]), partition="combined", panel=panel)
+    assert basis.index.equals(pd.DatetimeIndex(index))
+    assert list(skew.columns) == ["RB", "HC"]
 
-    def capture(figure, path, *args, **kwargs):
-        seen[path.stem] = [axis.lines[0].get_ydata().tolist() for axis in figure.axes]
-        savefig(figure, path, *args, **kwargs)
 
-    monkeypatch.setattr(Figure, "savefig", capture)
-    paths = P.plot_yearly_returns_drawdowns(equity, tmp_path, strategy="strategy")
+def test_span_market_reads_contract_parameters_and_warms_oos_volume(monkeypatch):
+    calls = []
 
-    assert annual[("strategy", 2021)] == pytest.approx(-0.20)
-    assert annual[("strategy", 2022)] == pytest.approx(0.10)
-    assert [p.name for p in paths] == ["2021.png", "2022.png"]
-    assert all(p.is_file() for p in paths)
-    assert seen["2021"][0] == pytest.approx([-.1, -.2])
-    assert seen["2021"][1] == pytest.approx([-.1, -.2])
-    assert seen["2022"][0] == pytest.approx([-.05, .10])
-    assert seen["2022"][1] == pytest.approx([-.05, 0.0])
+    def fake_load_market(bars, fees, ids, start, *, root, flat_margin, partition):
+        calls.append(dict(first=bars["date"].min(), last=bars["date"].max(), start=start,
+                          root=root, partition=partition))
+        return {pd.Timestamp(start): {}}
+
+    monkeypatch.setattr(P, "load_market", fake_load_market)
+    bars = pd.DataFrame({"date": pd.to_datetime(["2021-12-30", "2021-12-31", "2022-01-04"])})
+    market = P._span_market(bars, pd.DataFrame(), pd.DataFrame(), {"RB2205"}, P.BACKTEST_START)
+    research, oos = calls
+    assert research["root"].name == oos["root"].name == "contracts"
+    assert research["last"] == pd.Timestamp("2021-12-31")
+    assert oos["partition"] == "oos" and oos["start"] == pd.Timestamp(P.C.OOS_START)
+    assert oos["first"] == pd.Timestamp("2021-12-30")
+    assert len(market) == 2
+
+
+def test_oos_fee_fallback_reaches_back_to_research_rows():
+    research = pd.DataFrame({"contract": ["RR2202"], "trading_date": pd.to_datetime(["2021-12-31"]),
+                             "open_commission": [1.0]})
+    oos = pd.DataFrame({"contract": ["RR2203"], "trading_date": pd.to_datetime(["2022-01-04"]),
+                        "open_commission": [2.0]})
+    fallback = P._oos_fee_fallback(research, oos).sort_values("trading_date")
+    query = pd.DataFrame({"contract": ["RR2202", "RR2203"], "date": pd.to_datetime(["2022-01-04"] * 2)})
+    matched = pd.merge_asof(query, fallback.rename(columns={"trading_date": "date"}),
+                            on="date", by="contract", direction="backward")
+    assert matched["open_commission"].tolist() == [1.0, 2.0]

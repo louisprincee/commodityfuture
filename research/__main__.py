@@ -8,7 +8,7 @@ import config as C
 import data as D
 
 COMMANDS = ("panel", "member-ic", "paper-ic", "five-day-ic", "candidate-ic", "xs-robustness",
-            "member-smoothing", "member-complementarity", "chain-ic", "behavior-family", "plot-ic")
+            "member-smoothing", "member-complementarity", "chain-ic", "plot-ic")
 
 
 def main(argv: list[str]) -> int:
@@ -21,43 +21,37 @@ def main(argv: list[str]) -> int:
         D.build_panel_cache()
         return 0
     if cmd == "plot-ic":
-        from research import plot_ic
+        from research.ic import plot as plot_ic
         output = C.study_dir("xs_position") / "factor_significance.png"
         print(f"因子显著性图写入 {plot_ic.run(C.study_dir('xs_position'), C.study_dir('member_ic'), output)}")
         return 0
     if cmd == "candidate-ic":
-        from research import economic_ic
+        from research.ic import economic as economic_ic
         economic_ic.run(D.load_panel(), C.study_dir("economic_ic"))
         return 0
     if cmd == "xs-robustness":
-        from research import xs_robustness
+        from research.ic import robustness as xs_robustness
         xs_robustness.run(C.study_dir("xs_robustness"))
         return 0
     if cmd == "member-smoothing":
-        from research import member_smoothing
+        from research.member import smoothing as member_smoothing
         out = C.study_dir("member_smoothing")
         result = member_smoothing.run(out, args.jobs)
         print(f"{len(result)} 项 IC 写入 {out}")
         return 0
     if cmd == "member-complementarity":
-        from research import member_complementarity
+        from research.member import complementarity as member_complementarity
         out = C.study_dir("member_complementarity")
         result = member_complementarity.run(out, args.jobs)
         print(f"{len(result)} 项持仓条件价差写入 {out}")
         return 0
-    if cmd == "behavior-family":
-        from research import member_behavior_family
-        out = C.study_dir("member_behavior")
-        result = member_behavior_family.run(out, args.jobs)
-        print(f"{len(result)} 项事先声明的持仓行为检验写入 {out}")
-        return 0
     if cmd == "chain-ic":
-        from research import member_behavior
+        from research.member import chain as member_behavior
         out = C.study_dir("member_behavior")
         result = member_behavior.run_chain_ic(out, args.jobs)
         print(result.round(4).to_string(index=False))
         return 0
-    from research import ic_study
+    from research.ic import study as ic_study
     panel = D.load_panel()
     if cmd == "member-ic":
         ic_study.run_member_ic(panel, C.study_dir("member_ic"), jobs=args.jobs)

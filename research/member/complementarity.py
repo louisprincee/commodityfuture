@@ -19,8 +19,8 @@ from joblib import Parallel, delayed
 import config as C
 import data as D
 from research.factors import member_tables, seat_turnover_groups
-from research.ic_study import _bh, forward_returns, return_matrix
-from research.xs_robustness import START, hac_t
+from research.ic.study import _bh, forward_returns, return_matrix
+from research.ic.robustness import START, hac_t
 
 HOLD = 5
 MIN_NAMES = 20
@@ -76,6 +76,8 @@ def load_seat_inputs(panel: pd.DataFrame, jobs: int, *, partition: str):
     elif partition == "oos":
         start = pd.Timestamp(C.OOS_START)
         C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "持仓互补样本外日面板")
+    elif partition == "combined":
+        start = START
     else:
         raise ValueError(f"未知分区 {partition}")
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
@@ -85,10 +87,8 @@ def load_seat_inputs(panel: pd.DataFrame, jobs: int, *, partition: str):
         return panel.pivot(index="date", columns="symbol", values=name)
 
     eligible = wide("eligible").eq(True)
-    root = C.daily_dir(partition) / "member_rank"
-    if partition == "research":
-        C.assert_research_only(root)
-    names = [s for s in eligible.columns[eligible.loc[start:].any()] if (root / f"{s}_long.pkl").is_file()]
+    ranked = D.symbols_with_member_rank(partition)
+    names = [s for s in eligible.columns[eligible.loc[start:].any()] if s in ranked]
     eligible = eligible[names]
     volume, oi = wide("volume_total"), wide("oi_total")
     states = Parallel(n_jobs=jobs, prefer="threads")(
@@ -101,16 +101,16 @@ def load_seat_inputs(panel: pd.DataFrame, jobs: int, *, partition: str):
 
 
 def run(out: Path, jobs: int) -> pd.DataFrame:
-    from research.member_smoothing import load_daily_flow
+    from research.member.smoothing import load_daily_flow
 
     panel = D.load_panel()
     sticky, size, contracts = load_seat_inputs(panel, jobs, partition="research")
     oi = panel.pivot(index="date", columns="symbol", values="oi_total").reindex_like(contracts)
     flow = load_daily_flow(contracts, oi).rolling(5, min_periods=5).mean().reindex_like(sticky)
-    sticky = sticky.where(flow.notna() & size.notna())
     bars = D.load_contracts("research")
     returns = return_matrix(contracts, bars.set_index(["contract", "date"])["open"])
     labels = forward_returns(returns, HOLD).reindex_like(sticky)
+    sticky = sticky.where(flow.notna() & size.notna() & labels.notna())
     daily = daily_contrasts(sticky_quintiles(sticky), flow, size, labels)
     per_day = sticky.notna().sum(axis=1)
     coverage = per_day.where(per_day.ge(MIN_NAMES))

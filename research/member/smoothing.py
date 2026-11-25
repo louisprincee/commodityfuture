@@ -4,8 +4,6 @@
 净多贡献族以全榜可见多空总持仓统一归一化，检查 1/5/10/20 日。
 持仓流族检查 1/5/10 日及剔除首段后的 2–5、6–10 日。窗口必须连续完整。
 每族的 IC 检验单独做 BH。前后半期的两端价差仅作描述。
-若任一流版本在任一后续段的两段研究期平均两端价差均为正，
-则两版本均进入固定的交易频率对照，并报告所有起始偏移。
 """
 from __future__ import annotations
 
@@ -19,13 +17,12 @@ from joblib import Parallel, delayed
 import config as C
 import data as D
 from research.factors import daily_position_flow, member_tables, seat_turnover_groups
-from research.ic_study import _bh, _rank_corr, forward_returns, return_matrix
-from research.xs_robustness import MIN_NAMES, START, hac_t, leg_returns, membership_turnover
+from research.ic.study import _bh, _rank_corr, forward_returns, return_matrix
+from research.ic.robustness import MIN_NAMES, START, hac_t, leg_returns, membership_turnover
 
 LEVEL_WINDOWS = {"d1": (1, 1), "d5": (1, 5), "d10": (1, 10), "d20": (1, 20)}
 RESIDUAL_WINDOWS = {"d2_to_d5": (2, 5), "d6_to_d10": (6, 10)}
 FLOW_WINDOWS = {**{k: LEVEL_WINDOWS[k] for k in ("d1", "d5", "d10")}, **RESIDUAL_WINDOWS}
-FLOW_VERSIONS = ("FLOW_RAW", "FLOW_MA5")
 
 
 def common_seat_shares(tables: dict, market: pd.DataFrame) -> pd.DataFrame:
@@ -105,20 +102,15 @@ def load_seat_levels(panel: pd.DataFrame, eligible: pd.DataFrame, jobs: int) -> 
 
 
 def load_daily_flow(universe: pd.DataFrame, oi: pd.DataFrame) -> pd.DataFrame:
-    """读取日度持仓流并用研究分区内的榜单补齐四个预热交易日。"""
+    """由研究分区榜单直接计算每个交易日的持仓流，不先按流动性池遮掩。
+
+    五日均值因此用完整的 t-4..t 历史，流动性池只在 t 日筛选。
+    """
     dates, symbols = universe.index, universe.columns
-    flow_path = C.study_dir("member_ic") / "daily_factors_and_returns.csv"
-    C.assert_research_only(flow_path)
-    daily = pd.read_csv(flow_path, usecols=["signal_date", "symbol", "FLOW_CONTROL"], parse_dates=["signal_date"])
-    C.assert_no_holdout_dates(daily["signal_date"], "持仓流")
-    # 旧归档从 2016 年首日开始。补足窗口时仅用研究分区的预热榜单。
-    flow = daily.pivot(index="signal_date", columns="symbol", values="FLOW_CONTROL").reindex(
-        index=dates, columns=symbols
-    )
-    warmup = dates[dates < START][-4:]
+    flow = pd.DataFrame(np.nan, index=dates, columns=symbols)
     for s in symbols:
-        tables = member_tables(s, warmup, partition="research")
-        flow.loc[warmup, s] = daily_position_flow(tables, oi[s].loc[warmup])
+        tables = member_tables(s, dates, partition="research")
+        flow[s] = daily_position_flow(tables, oi[s].reindex(dates))
     return flow
 
 

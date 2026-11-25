@@ -6,7 +6,8 @@
 因子（方向）
   经济族
     ROLL_YIELD       +  米筐主力/次主力年化展期收益，当日（Koijen et al. 2018；Szymanowska et al. 2014）
-    MOM_12_1         +  过去 242 日复合收益，跳过最近 21 日（Asness, Moskowitz & Pedersen 2013）
+    MOM_12_1         +  t-241..t-21 共 221 日复合收益，即 12 个月跳过最近 1 个月（Asness, Moskowitz & Pedersen 2013）；
+                        2026-11-25 由误写的 13-1 月窗口更正，属看过结果后的新规格
     BASIS_MOM_242    +  过去 242 日主力复合收益减次主力复合收益，各用同合约日收益（Boons & Prado 2019）
     SKEW_242         -  过去 242 日（至少 200 日）主力日收益偏度，低偏度做多（Fernandez-Perez et al. 2018）
   会员持仓族（开源/兴业原文方向，不改号）
@@ -37,8 +38,9 @@ import pandas as pd
 import config as C
 import data as D
 from research import factors as F
-from research.economic_ic import candidate_factors
-from research.ic_study import _bh, _rank_corr, forward_returns, return_matrix
+from research.factors.price import basis_momentum, rolling_skew
+from research.ic.economic import candidate_factors
+from research.ic.study import _bh, _rank_corr, forward_returns, return_matrix
 
 HORIZONS = (5, 10, 20)
 JUDGE_H = 10
@@ -51,36 +53,6 @@ SIGNS = {
     "K_DB_OI": 1, "NEG_K_DS_OI": 1, "FLOW_CONTROL": 1, "K_NET_SHARE": 1,
 }
 FAMILY = {name: ("economic" if i < 4 else "member") for i, name in enumerate(SIGNS)}
-
-
-def basis_momentum(ret1: pd.DataFrame, ret2: pd.DataFrame, window: int = 242) -> pd.DataFrame:
-    """主力与次主力各自同合约日收益的 window 日复合收益之差；任一侧不满窗为缺失。"""
-    def compound(r: pd.DataFrame) -> pd.DataFrame:
-        return np.expm1(np.log1p(r).rolling(window, min_periods=window).sum())
-    return compound(ret1) - compound(ret2)
-
-
-def rolling_skew(ret1: pd.DataFrame, window: int = 242, min_periods: int = 200) -> pd.DataFrame:
-    return ret1.rolling(window, min_periods=min_periods).skew()
-
-
-def load_price_factors(index: pd.Index, columns: pd.Index, *, partition: str = "research",
-                       panel: pd.DataFrame | None = None):
-    """在完整预热日历上计算固定的基差动量和负偏度，再对齐到评价品种日。"""
-    if partition == "research":
-        panel = D.load_panel() if panel is None else panel
-        C.assert_no_holdout_dates(panel["date"], "价格因子研究期日面板")
-    elif partition == "oos":
-        C.assert_oos_dates(index, "价格因子样本外日历")
-        panel = D.load_evaluation_panel() if panel is None else panel
-    else:
-        raise ValueError(f"未知分区 {partition}")
-    panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)]
-    ret1 = panel.pivot(index="date", columns="symbol", values="ret1")
-    ret2 = panel.pivot(index="date", columns="symbol", values="ret2")
-    basis = basis_momentum(ret1, ret2).reindex(index=index, columns=columns)
-    neg_skew = -rolling_skew(ret1).reindex(index=index, columns=columns)
-    return basis, neg_skew
 
 
 def hac_t(series: pd.Series, lags: int) -> float:
@@ -326,6 +298,34 @@ def sticky_core_correlation(factors: dict[str, pd.DataFrame], out: Path) -> pd.D
     return corr
 
 
+def sticky_core_composite_ic(factors: dict[str, pd.DataFrame], labels: dict[int, pd.DataFrame],
+                             out: Path) -> pd.DataFrame:
+    """STICKY_CORE 合成得分的研究期截面 IC：三因子共同有效候选内百分位秩等权平均，与策略同口径。
+
+    合成成员与等权规则来自已定策略，属于事后检验，不进入主族 BH。
+    """
+    keys = ("BASIS_MOM_242", "NEG_SKEW_242", "STICKY_NET_SHARE")
+    common = next(iter(factors.values())).notna()
+    for key in keys:
+        common &= factors[key].notna()
+    comp = sum(factors[key].where(common).rank(axis=1, pct=True) for key in keys) / len(keys)
+    rows = []
+    for h in HORIZONS:
+        ic, count = _rank_corr(comp, labels[h], MIN_NAMES)
+        t = hac_t(ic, max(20, 2 * h))
+        rows.append(dict(
+            members="+".join(keys), horizon=h, mean_ic=ic.mean(), hac_t=t,
+            p=math.erfc(abs(t) / math.sqrt(2)) if np.isfinite(t) else np.nan,
+            days=int(ic.count()), avg_names=count.mean(), ic_ir=ic.mean() / ic.std(),
+            ic_2016_2018=ic.loc[:"2018"].mean(), ic_2019_2021=ic.loc["2019":].mean(),
+            positive_years=int(ic.groupby(ic.index.year).mean().gt(0).sum()),
+        ))
+    result = pd.DataFrame(rows)
+    out.mkdir(parents=True, exist_ok=True)
+    result.to_csv(out / "sticky_core_composite_ic.csv", index=False)
+    return result
+
+
 def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     member_path = member_path or C.study_dir("member_ic") / "daily_factors_and_returns.csv"
     C.assert_research_only(member_path)
@@ -337,22 +337,6 @@ def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     ranked = {k: v.rank(axis=1, pct=True) for k, v in scores.items()}
     corr = pd.DataFrame({a: {b: _rank_corr(ranked[a], ranked[b], MIN_NAMES)[0].mean() for b in ranked} for a in ranked})
 
-    composite_rows = []
-    chosen = list(checks.index[checks["robust"]])
-    if chosen:
-        stack = pd.concat([ranked[k] for k in chosen], keys=chosen)
-        comp = stack.groupby(level=1).mean().where(stack.groupby(level=1).count().ge(len(chosen)))
-        comp = comp.reindex(next(iter(scores.values())).index)
-        for h in HORIZONS:
-            ic, count = _rank_corr(comp, labels[h], MIN_NAMES)
-            legs = leg_returns(comp, labels[h])
-            composite_rows.append(dict(
-                members="+".join(chosen), horizon=h, mean_ic=ic.mean(), hac_t=hac_t(ic, max(20, 2 * h)),
-                ic_2016_2018=ic.loc[:"2018"].mean(), ic_2019_2021=ic.loc["2019":].mean(),
-                long_excess_bp=1e4 * (legs.top - legs.pool).mean(), short_excess_bp=1e4 * (legs.pool - legs.bottom).mean(),
-                tail_turnover=membership_turnover(comp), positive_years=int(ic.groupby(ic.index.year).mean().gt(0).sum()),
-            ))
-
     seat_signs = {"STICKY_NET_SHARE": 1, "SPEC_NET_SHARE": 1}
     seat_family = {k: "seat_purified" for k in seat_signs}
     seat_res, _, _, seat_checks, _ = _evaluate_family(
@@ -363,17 +347,18 @@ def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     )
 
     out.mkdir(parents=True, exist_ok=True)
-    sticky_core_correlation({
+    core = {
         "BASIS_MOM_242": scores["BASIS_MOM_242"],
         "NEG_SKEW_242": scores["SKEW_242"],
         "STICKY_NET_SHARE": seat_scores["STICKY_NET_SHARE"],
-    }, out)
+    }
+    sticky_core_correlation(core, out)
+    sticky_core_composite_ic(core, labels, out)
     result.to_csv(out / "factor_horizons.csv", index=False)
     yearly.to_csv(out / "ic_by_year.csv", index=False)
     legs_yearly.to_csv(out / "legs_by_year.csv", index=False)
     checks.to_csv(out / "robustness_checks.csv")
     corr.to_csv(out / "factor_rank_correlation.csv")
-    pd.DataFrame(composite_rows).to_csv(out / "composite.csv", index=False)
     seat_out.to_csv(out / "seat_purified.csv", index=False)
     pd.DataFrame({f"{k}_d{h}": v for (k, h), v in daily_ic.items()}).to_csv(out / "daily_ic.csv", index_label="date")
     return result

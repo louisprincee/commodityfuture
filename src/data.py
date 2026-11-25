@@ -315,16 +315,25 @@ def build_daily_panel(partition: str = "research", symbols: list[str] | None = N
     return panel.sort_values(["date", "symbol"], kind="mergesort").reset_index(drop=True)
 
 
+def symbols_with_member_rank(partition: str) -> set[str]:
+    """有品种级多头榜文件的商品代码。完整区间同时查看研究期和样本外。"""
+    parts = ("research", "oos") if partition == "combined" else (partition,)
+    names: set[str] = set()
+    for part in parts:
+        root = C.daily_dir(part) / "member_rank"
+        if part == "research":
+            C.assert_research_only(root)
+        names.update(path.stem.removesuffix("_long") for path in root.glob("*_long.pkl"))
+    return names
+
+
 def member_universe(panel: pd.DataFrame, start: pd.Timestamp, partition: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """流动性资格、主力映射和评价期内具有会员榜文件的商品品种。"""
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])
     panel = panel.assign(eligible=eligibility(panel))
     eligible = panel.pivot(index="date", columns="symbol", values="eligible").eq(True)
-    rank_root = C.daily_dir(partition) / "member_rank"
-    if partition == "research":
-        C.assert_research_only(rank_root)
-    names = [name for name in eligible.columns[eligible.loc[start:].any()]
-             if (rank_root / f"{name}_long.pkl").is_file()]
+    ranked = symbols_with_member_rank(partition)
+    names = [name for name in eligible.columns[eligible.loc[start:].any()] if name in ranked]
     dominant = panel.pivot(index="date", columns="symbol", values="c1_contract")
     return eligible[names], dominant[names]
 
@@ -410,7 +419,7 @@ def _concat_rank_frames(research: pd.DataFrame, oos: pd.DataFrame, keys: list[st
 
 
 def load_member_rank_span(symbol: str) -> pd.DataFrame:
-    """样本外因子预热：研究期排名接在样本外排名之前。"""
+    """样本外和完整区间共用：研究期排名接在样本外排名之前。"""
     return _concat_rank_frames(
         load_member_rank(symbol, "research"),
         load_member_rank(symbol, "oos"),
@@ -419,7 +428,7 @@ def load_member_rank_span(symbol: str) -> pd.DataFrame:
 
 
 def load_evaluation_panel() -> pd.DataFrame:
-    """样本外评价面板。研究期行情只作预热，不写入研究缓存。"""
+    """研究期接样本外的日面板，供样本外评价（研究期只作预热）和完整区间连续回测使用，不写入研究缓存。"""
     research = load_panel().drop(columns=["eligible"], errors="ignore")
     oos = build_daily_panel("oos")
     missing = [column for column in oos.columns if column not in research.columns]

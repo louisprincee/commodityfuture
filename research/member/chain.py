@@ -13,7 +13,7 @@ from joblib import Parallel, delayed
 from src import config as C
 from src import data as D
 from research.factors.member import member_tables, net_gross_share as masked_net_share, seat_turnover_groups
-from research.ic.labels import forward_returns, return_matrix
+from research.ic.study import forward_returns, return_matrix
 from research.ic.robustness import MIN_NAMES, START
 from research.ic.statistics import hac_t, rank_corr as _rank_corr, rank_residual
 

@@ -19,11 +19,23 @@ from joblib import Parallel, delayed
 
 from research.factors.member import market_inputs, member_tables, sticky_net_share
 from research.ic.study import _bh, _rank_corr, forward_returns
-from research.history.labels_v1 import return_matrix
 SETTINGS = {
-    "specification": "member_turnover_spread_v1", "start": "2010-01-04", "end": "2021-12-31",
-    "primary_horizon": 10, "horizons": (5,10,20), "min_names": 8, "min_days": 120,
+    "specification": "turnover_spread", "start": "2010-01-04", "end": "2021-12-31",
+    "primary_horizon": 10, "horizons": (5, 10, 20), "min_names": 8, "min_days": 120,
 }
+
+
+def return_matrix(contract_map: pd.DataFrame, bar_open: pd.Series) -> pd.DataFrame:
+    """历史差值研究的原始主力映射口径，仅用于复现已退役实验。"""
+    dates = contract_map.index
+    ids = contract_map.to_numpy().ravel()
+    entry_date = dates.to_numpy().repeat(len(contract_map.columns))
+    exit_date = dates.to_series().shift(-1).to_numpy().repeat(len(contract_map.columns))
+    entry = bar_open.reindex(pd.MultiIndex.from_arrays([ids, entry_date])).to_numpy()
+    exit_price = bar_open.reindex(pd.MultiIndex.from_arrays([ids, exit_date])).to_numpy()
+    valid = (entry > 0) & (exit_price > 0)
+    ret = np.divide(exit_price, entry, out=np.full(len(entry), np.nan), where=valid) - 1
+    return pd.DataFrame(ret.reshape(contract_map.shape), index=dates, columns=contract_map.columns)
 from src import config as C
 from src import data as D
 

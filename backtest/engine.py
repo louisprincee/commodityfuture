@@ -1,13 +1,13 @@
 """商品期货整数手账本、绩效统计和策略命令行入口。
 
     python -m backtest.engine --research
+    python -m backtest.engine --start 2011 --end 2021
     python -m backtest.engine --oos
     python -m backtest.engine --start 2016 --end 2025
-    python -m backtest.engine --family member --start 2016 --end 2025
+    python -m backtest.engine --experiment sticky-flow
 
-默认运行 2016–2021 研究期。保留四套已有策略；member 与 member_price 分类管理，
-输出存放在 runs/strategies/member/ 下。策略源码均在 strategies/。
-2011–2021 批量运行使用根目录 run.py，输出与旧结果分开保存。
+默认运行 2016–2021 研究期；2011–2021 使用完整 2010 年预热。四套现有策略均保留：
+member（Sticky-only、Sticky-chain）与 member_price（Sticky-core、Sticky-core-h20）。
 """
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ FLAT_MARGIN = 0.20
 BENCHMARK_NAME_CAP = 0.10
 SLIPPAGE_TICKS = 1
 BACKTEST_START = pd.Timestamp(XS_POSITION["test_start"])
+WARMUP_START = pd.Timestamp("2010-01-04")
+EXTENDED_START = pd.Timestamp("2011-01-04")
 LIQUIDATION_DAYS = 5
 
 
@@ -592,10 +594,9 @@ def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str
 
 # ---------------------------------------------------------------- 命令行入口
 
-# 当前仅运行只用会员持仓的 Sticky-only。输出目录：
-#   runs/strategies/<类别>/<策略>/{research,oos,combined}/
-#   runs/strategies/<类别>/comparison/{research,oos,2016-2025}/
-# Sticky-only 采用 10 日重叠持有。
+# 保留四套已有策略：
+#   runs/strategies/<类别>/<策略>/{research,research_2011_2021,oos,combined}/
+#   runs/strategies/<类别>/comparison/{research,research_2011_2021,oos,2016-2025}/
 FAMILIES = {"member": (sticky_only, sticky_chain), "member_price": (sticky_core, sticky_core_h20)}
 FAMILY_TITLES = {
     "member": "会员持仓因子 · 商品期货截面策略",
@@ -603,7 +604,7 @@ FAMILY_TITLES = {
 }
 MODULES = {module.STRATEGY_ID: module for books in FAMILIES.values() for module in books}
 FAMILY_OF = {module.STRATEGY_ID: family for family, books in FAMILIES.items() for module in books}
-PERIOD_LABELS = {"research": "研究期", "oos": "样本外"}
+PERIOD_LABELS = {"research": "研究期 2016–2021", "research_2011_2021": "扩展研究期 2011–2021", "oos": "样本外 2022–2025"}
 
 
 def book_dir(name: str) -> Path:
@@ -674,60 +675,61 @@ def _span_market(bars: pd.DataFrame, research_fees: pd.DataFrame, oos_fees: pd.D
     return {**research, **oos}
 
 
-def _run_partition(module, partition: str, base_out: Path, jobs: int) -> None:
+def _partition_inputs(partition: str):
     if partition == "combined":
         panel = D.load_evaluation_panel()
         research_fees, oos_fees = _span_fees()
-        fees = pd.concat([research_fees, oos_fees], ignore_index=True)
-        start, root = BACKTEST_START, None
+        fees = (research_fees, oos_fees)
+        start, root, data_partition = BACKTEST_START, None, "combined"
         check_dates = _assert_continuous_dates
     elif partition == "oos":
         panel = D.load_evaluation_panel()
-        start, root = pd.Timestamp(C.OOS_START), C.OOS_EXECUTION_PARAMETERS
+        start, root, data_partition = pd.Timestamp(C.OOS_START), C.OOS_EXECUTION_PARAMETERS, "oos"
         check_dates = C.assert_oos_dates
         fees = _oos_fee_fallback(*_span_fees())
     else:
         panel, fee_path = D.load_panel(), C.RESEARCH_FEE_PATH
-        start, root = BACKTEST_START, C.RESEARCH_EXECUTION_PARAMETERS
-        check_dates = C.assert_no_holdout_dates
         C.assert_research_only(fee_path)
+        check_dates = C.assert_no_holdout_dates
         check_dates(panel["date"], "研究期日面板")
+        if partition == "research_2011_2021":
+            panel = panel.loc[panel["date"].between(WARMUP_START, pd.Timestamp(C.RESEARCH_END))]
+            if panel.empty or panel["date"].min() > WARMUP_START:
+                raise ValueError("缺少完整 2010 年预热面板")
+            start = EXTENDED_START
+        else:
+            start = BACKTEST_START
+        root, data_partition = C.RESEARCH_EXECUTION_PARAMETERS, "research"
         fees = pd.read_csv(fee_path, parse_dates=["trading_date"])
         check_dates(fees["trading_date"], "历史手续费")
+    bars = D.load_contracts_span("oos" if partition == "combined" else data_partition, for_execution=True)
+    return panel, bars, fees, start, root, data_partition, check_dates
 
-    bars = D.load_contracts_span("oos" if partition == "combined" else partition, for_execution=True)
-    benchmark = module is None
-    if benchmark:
-        book, curve_file = BENCHMARK_BOOK, "equity_curves.csv"
-        targets = _benchmark_targets(panel, start, partition)
-    else:
-        book, curve_file = module.MAIN_BOOK, module.EQUITY_CURVE_FILE
-        targets = module.build_targets(panel, bars, start, partition, jobs)
-    contracts = targets.dominant.shift(1).reindex_like(targets.weights)
-    check_dates(contracts.index, "策略净值交易日")
-    ids = {contract for contract in contracts.to_numpy().ravel() if isinstance(contract, str)}
-    if partition == "combined":
-        market = _span_market(bars, research_fees, oos_fees, ids, start)
-    else:
-        market = load_market(bars, fees, ids, start, root=root / "contracts",
-                             flat_margin=FLAT_MARGIN, partition=partition)
-    weights = targets.weights if benchmark else targets.weights * TARGET_MULTIPLIER
-    name_cap = BENCHMARK_NAME_CAP if benchmark else NAME_CAP
 
-    rows, curves = [], {}
+def _save_book_run(book: str, targets: Targets, contracts: pd.DataFrame, market: dict,
+                   start: pd.Timestamp, out: Path, *, neutral: bool, hold: int,
+                   curve_file: str = "equity_curves.csv", save_details: bool = False) -> tuple[list[dict], pd.DataFrame]:
+    weights = targets.weights * TARGET_MULTIPLIER if neutral else targets.weights
+    name_cap = NAME_CAP if neutral else BENCHMARK_NAME_CAP
+    out.mkdir(parents=True, exist_ok=True)
+    rows, curves, main_ledger = [], {}, None
     for ticks in (SLIPPAGE_TICKS, 2):
-        ledger, _ = simulate(
-            weights, contracts, market, start, neutral=not benchmark, slippage_ticks=ticks, name_cap=name_cap,
+        ledger, fills = simulate(
+            weights, contracts, market, start, neutral=neutral, slippage_ticks=ticks, name_cap=name_cap,
         )
         row = _book_summary(book, ticks, ledger)
-        if not benchmark:
-            row.update(hold=getattr(module, "HOLD", HORIZON), target_multiplier=TARGET_MULTIPLIER)
+        row.update(start=start.date(), end=ledger.index.max().date(), hold=hold,
+                   target_multiplier=TARGET_MULTIPLIER if neutral else 1,
+                   first_fill=None if fills.empty else fills["date"].min().date(),
+                   fee_carried_fills=int(fills["fee_carried"].sum()) if not fills.empty else 0,
+                   fee_cross_contract_fills=int(fills["fee_cross_contract"].sum()) if not fills.empty else 0)
         rows.append(row)
         if ticks == SLIPPAGE_TICKS:
             curves[book] = ledger["equity"]
-
-    out = base_out / partition
-    out.mkdir(parents=True, exist_ok=True)
+            main_ledger = ledger
+            if save_details:
+                ledger.to_csv(out / "daily_ledger.csv", index_label="date")
+                fills.to_csv(out / "fills.csv", index=False)
     summary = pd.DataFrame(rows)
     summary.to_csv(out / "summary.csv", index=False)
     equity = pd.DataFrame(curves)
@@ -738,6 +740,29 @@ def _run_partition(module, partition: str, base_out: Path, jobs: int) -> None:
     fields = ["book", "end_equity", "net_ann", "sharpe", "max_drawdown"]
     print(summary.loc[summary.ticks.eq(SLIPPAGE_TICKS), fields].round(4).to_string(index=False))
     print(f"回测结果写入 {out}")
+    return rows, main_ledger
+
+
+def _run_partition(module, partition: str, base_out: Path, jobs: int) -> None:
+    panel, bars, fees, start, root, data_partition, check_dates = _partition_inputs(partition)
+    benchmark = module is None
+    if benchmark:
+        book, curve_file, hold = BENCHMARK_BOOK, "equity_curves.csv", 1
+        targets = _benchmark_targets(panel, start, data_partition)
+    else:
+        book, curve_file, hold = module.MAIN_BOOK, module.EQUITY_CURVE_FILE, getattr(module, "HOLD", HORIZON)
+        targets = module.build_targets(panel, bars, start, data_partition, jobs)
+    contracts = targets.dominant.shift(1).reindex_like(targets.weights)
+    check_dates(contracts.index, "策略净值交易日")
+    ids = {contract for contract in contracts.to_numpy().ravel() if isinstance(contract, str)}
+    if partition == "combined":
+        market = _span_market(bars, fees[0], fees[1], ids, start)
+    else:
+        market = load_market(bars, fees, ids, start, root=root / "contracts",
+                             flat_margin=FLAT_MARGIN, partition=data_partition)
+    _save_book_run(book, targets, contracts, market, start, base_out / partition,
+                   neutral=not benchmark, hold=hold, curve_file=curve_file,
+                   save_details=(partition == "research_2011_2021"))
 
 
 def _read_curve(path: Path) -> pd.DataFrame:
@@ -843,24 +868,94 @@ def _write_all_comparison(families: list[dict[str, pd.DataFrame]]) -> None:
     pd.DataFrame(rows).to_csv(C.strategy_dir("") / "summary.csv", index=False)
 
 
+def _write_extended_comparison(selected: list[str], equity: pd.DataFrame) -> None:
+    """汇总 2011–2021 全部现役策略的分区结果与对比图。"""
+    out = comparison_dir(None) / "research_2011_2021"
+    out.mkdir(parents=True, exist_ok=True)
+    summaries = [pd.read_csv(book_dir(name) / "research_2011_2021" / "summary.csv") for name in selected]
+    bmk_summary = C.strategy_dir("benchmark") / "research_2011_2021" / "summary.csv"
+    if bmk_summary.is_file():
+        summaries.append(pd.read_csv(bmk_summary))
+    pd.concat(summaries, ignore_index=True).to_csv(out / "summary.csv", index=False)
+    equity.to_csv(out / "equity_curves.csv", index_label="date")
+    yearly_returns(equity).to_csv(out / "yearly_returns.csv", index=False)
+    frame = equity.rename(columns={BENCHMARK_BOOK: BENCHMARK_LABEL}) / CAPITAL_CNY
+    _plot_performance(frame, out / "overview.png", title="四套策略 · 2011–2021 · 统一非交割执行")
+
+
+def _run_sticky_flow(jobs: int) -> None:
+    """固定增量试验：2011–2021 共同样本比较 Sticky-only、Flow-only 与 Sticky + Flow。"""
+    from strategies import sticky_flow as S
+    from research.member.review import evaluate_net_return_gains
+
+    panel, bars, fees, start, root, data_partition, check_dates = _partition_inputs("research_2011_2021")
+    targets = S.build_books(panel, start, jobs)
+    samples = [targets[b].selection[["date", "sample_hash", "candidates"]]
+               for b in (S.STICKY_BOOK, S.FLOW_BOOK, S.COMBINED_BOOK)]
+    for sample in samples[1:]:
+        pd.testing.assert_frame_equal(samples[0], sample)
+    configured = [(book, target, C.strategy_dir("member") / "sticky_flow" / book.lower(), True, HORIZON)
+                  for book, target in targets.items()]
+    configured.append((BENCHMARK_BOOK, _benchmark_targets(panel, start, data_partition),
+                       C.strategy_dir("benchmark") / "sticky_flow", False, 1))
+    calls = {book: target.dominant.shift(1).reindex_like(target.weights) for book, target, _, _, _ in configured}
+    ids = {value for matrix in calls.values() for value in matrix.to_numpy().ravel() if isinstance(value, str)}
+    market = load_market(bars, fees, ids, start, root=root / "contracts",
+                         flat_margin=FLAT_MARGIN, partition=data_partition)
+    summaries, curves, ledgers = [], {}, {}
+    for book, target, out, neutral, hold in configured:
+        check_dates(calls[book].index, "Sticky+Flow 策略日期")
+        rows, ledger = _save_book_run(book, target, calls[book], market, start, out,
+                                      neutral=neutral, hold=hold, save_details=False)
+        summaries.extend(rows)
+        curves[book] = ledger["equity"]
+        ledgers[book] = ledger
+    equity = pd.DataFrame(curves)
+    for book, _, out, neutral, _ in configured:
+        if neutral:
+            _plot_book_figures(equity, out, book, "Sticky + Flow · 2011–2021")
+    comp = comparison_dir(None) / "sticky_flow"
+    comp.mkdir(parents=True, exist_ok=True)
+    equity.to_csv(comp / "equity_curves.csv", index_label="date")
+    pd.DataFrame(summaries).to_csv(comp / "summary.csv", index=False)
+    yearly_returns(equity).to_csv(comp / "yearly_returns.csv", index=False)
+    books = [S.STICKY_BOOK, S.FLOW_BOOK, S.COMBINED_BOOK]
+    returns = equity[books].pct_change(fill_method=None)
+    returns.iloc[0] = equity[books].iloc[0] / CAPITAL_CNY - 1
+    parts = {b: pd.DataFrame({"gross": ledgers[b].gross_pnl / ledgers[b].equity.shift(1).fillna(CAPITAL_CNY),
+                              "cost": (ledgers[b].fees + ledgers[b].slippage) / ledgers[b].equity.shift(1).fillna(CAPITAL_CNY)})
+             for b in books}
+    evaluate_net_return_gains(returns, parts, S.STICKY_BOOK, books[1:]).to_csv(comp / "paired_return_gains.csv", index=False)
+    frame = equity.drop(columns=[S.REFERENCE_BOOK], errors="ignore").rename(columns={
+        S.STICKY_BOOK: "Sticky-only（共同样本）", S.FLOW_BOOK: "Flow-only（共同样本）",
+        S.COMBINED_BOOK: "Sticky + Flow（共同样本）", BENCHMARK_BOOK: BENCHMARK_LABEL,
+    }) / CAPITAL_CNY
+    _plot_performance(frame, comp / "overview.png", title="Sticky + Flow 增量试验 · 2011–2021")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m backtest.engine")
     parser.add_argument("strategy", nargs="?", choices=list(MODULES), help="省略时运行所选类别的全部策略")
-    parser.add_argument("--family", choices=list(FAMILIES), help="策略类别；当前仅 member")
+    parser.add_argument("--family", choices=list(FAMILIES), help="策略类别；省略时两类都运行")
+    parser.add_argument("--experiment", choices=("sticky-flow",), help="运行固定增量对照试验")
     period = parser.add_mutually_exclusive_group()
     period.add_argument("--research", dest="partition", action="store_const", const="research")
     period.add_argument("--oos", dest="partition", action="store_const", const="oos")
     period.add_argument("--start", type=int, help="回测起始年，搭配 --end")
-    period.add_argument("--partition", choices=("research", "oos", "combined"))
+    period.add_argument("--partition", choices=("research", "research_2011_2021", "oos", "combined"))
     parser.add_argument("--end", type=int, help="回测结束年，搭配 --start")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args(argv)
+    if args.experiment == "sticky-flow":
+        _run_sticky_flow(args.jobs)
+        return 0
     if (args.start is None) != (args.end is None):
         parser.error("--start 和 --end 须一起使用")
     partition = args.partition or "research"
     if args.start is not None:
         windows = {
             (BACKTEST_START.year, C.RESEARCH_END.year): "research",
+            (EXTENDED_START.year, C.RESEARCH_END.year): "research_2011_2021",
             (C.OOS_START.year, C.DEFAULT_OOS_END.year): "oos",
             (BACKTEST_START.year, C.DEFAULT_OOS_END.year): "combined",
         }
@@ -876,6 +971,7 @@ def main(argv: list[str]) -> int:
     else:
         families = [args.family] if args.family else list(FAMILIES)
     combined_families = []
+    extended_frames = []
     benchmark = None if partition == "combined" else _benchmark_curve(partition, args.jobs, reuse=False)
     for family in families:
         selected = [args.strategy] if args.strategy else [module.STRATEGY_ID for module in FAMILIES[family]]
@@ -883,10 +979,14 @@ def main(argv: list[str]) -> int:
             combined_families.append(_run_combined(family, selected, args.jobs))
             continue
         equity = _evaluate_partition(selected, partition, args.jobs, reuse=False, benchmark=benchmark)
+        if partition == "research_2011_2021":
+            extended_frames.append(equity.drop(columns=BENCHMARK_BOOK))
         if len(selected) > 1:
             _write_strategy_comparison(equity, partition, family)
     if len(combined_families) > 1:
         _write_all_comparison(combined_families)
+    if partition == "research_2011_2021" and not args.strategy and not args.family:
+        _write_extended_comparison(list(MODULES), pd.concat([*extended_frames, benchmark], axis=1))
     return 0
 
 

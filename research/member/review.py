@@ -12,10 +12,9 @@ import pandas as pd
 from joblib import Parallel, delayed
 from src import config as C
 from src import data as D
-from research.factors.member import member_tables, market_inputs
-from research.factors.member_profiles import FACTOR_META, profile_factors
+from research.factors.member import FACTOR_META, market_inputs, member_tables, profile_factors
 from research.ic.statistics import fixed_bh, mean_inference, rank_time_series, rank_corr as _rank_corr, rank_residual
-from research.ic.labels import forward_returns, return_matrix
+from research.ic.study import forward_returns, return_matrix
 from research.settings import MEMBER_REVIEW as SETTINGS
 
 START, END = SETTINGS['start'], SETTINGS['end']
@@ -23,7 +22,7 @@ HORIZONS = SETTINGS['horizons']
 PERIODS = {'2011-2021': (START, END), '2011-2015': (START, '2015-12-31'),
            '2016-2021': ('2016-01-04', END)}
 MIN_NAMES, MIN_DAYS = SETTINGS['min_names'], SETTINGS['min_days']
-OUT_NAME = 'member_imputation_v3'
+OUT_NAME = 'member_review'
 FRACTIONS = ('00', '50', '80', '100')
 
 
@@ -204,10 +203,10 @@ def run(out, jobs=4):
     flow_incremental(scores,labels).to_csv(out/'flow_incremental.csv',index=False)
     daily.loc[daily.period.eq('2011-2021')].to_parquet(out/'daily_ic.parquet',index=False)
     plot_comparison(summary,out/'imputation_comparison.png')
-    prior = C.study_dir('member_review_v2')/'factor_ic.csv'
+    prior = out / 'legacy_factor_ic.csv'
     if prior.is_file():
         old = pd.read_csv(prior)
-        old.loc[old.factor.isin(['RUN_LONG','DIR_STABLE'])].to_csv(out/'retained_profile_evidence.csv',index=False)
+        old.loc[old.factor.isin(['RUN_LONG', 'DIR_STABLE'])].to_csv(out / 'retained_profile_evidence.csv', index=False)
     print(summary.loc[summary.period.eq('2011-2021') & summary.horizon.eq(10),
                       ['factor','mean_ic','p','q_primary','q_all','days']].round(6).to_string(index=False))
     return summary

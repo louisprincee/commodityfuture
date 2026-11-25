@@ -41,7 +41,7 @@ from src import data as D
 from research.factors.member import market_inputs, member_tables, sticky_net_share
 from research.factors.price import basis_momentum, rolling_skew
 from research.ic.economic import candidate_factors
-from research.ic.labels import forward_returns, return_matrix
+from research.ic.study import forward_returns, return_matrix
 from research.ic.statistics import bh as _bh, hac_t, rank_corr as _rank_corr
 
 HORIZONS = (5, 10, 20)

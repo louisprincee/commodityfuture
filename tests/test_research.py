@@ -5,7 +5,7 @@ import pytest
 
 
 def test_forward_return_uses_signal_day_contract_at_next_two_opens():
-    from research.ic.labels import forward_open_returns, return_matrix, forward_returns
+    from research.ic.study import forward_open_returns, return_matrix, forward_returns
 
     days = pd.DatetimeIndex(["2021-12-24", "2021-12-27", "2021-12-28", "2021-12-29"])
     dominant = pd.Series(["OLD", "NEW", "LATER", "LATER"], index=days)
@@ -97,8 +97,7 @@ def rank_tables():
 
 @pytest.mark.parametrize('side', ['L', 'S'])
 def test_partial_missing_disclosed_changes_poison_the_side_and_signal(side):
-    from research.factors.member import daily_position_flow, spider_signal, disclosed_change_sum
-    from research.factors.member_profiles import profile_factors
+    from research.factors.member import daily_position_flow, spider_signal, disclosed_change_sum, profile_factors
 
     tables, market = rank_tables()
     tables[f'd{side}'].iloc[0, 1] = np.nan
@@ -194,7 +193,7 @@ def fixture(days=65):
 
 
 def test_temporal_profiles_require_full_history_and_reset_on_absence():
-    from research.factors.member_profiles import profile_factors
+    from research.factors.member import profile_factors
 
     tables, market = fixture(85)
     # b alternates direction; a and c stay directionally stable.
@@ -220,7 +219,7 @@ def test_temporal_profiles_require_full_history_and_reset_on_absence():
 
 
 def test_imputation_changes_values_with_original_membership_fixed():
-    from research.factors.member_profiles import profile_factors
+    from research.factors.member import profile_factors
 
     tables, market = fixture(1)
     tables['L'].iloc[0] = [90., 10., np.nan]
@@ -241,7 +240,7 @@ def test_imputation_changes_values_with_original_membership_fixed():
 
 
 def test_flows_require_disclosure_and_keep_full_five_day_warmup():
-    from research.factors.member_profiles import profile_factors
+    from research.factors.member import profile_factors
 
     tables, market = fixture(8)
     out = profile_factors(tables, market)
@@ -264,7 +263,7 @@ def test_flows_require_disclosure_and_keep_full_five_day_warmup():
 
 
 def test_prefix_matches_full_history_and_empty_ranks_remain_unknown():
-    from research.factors.member_profiles import profile_factors
+    from research.factors.member import profile_factors
 
     tables, market = fixture(70)
     full = profile_factors(tables, market)

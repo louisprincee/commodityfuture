@@ -18,7 +18,7 @@ from joblib import Parallel, delayed
 from src import config as C
 from src import data as D
 from research.factors.member import daily_position_flow, member_tables, seat_turnover_groups
-from research.ic.labels import forward_returns, return_matrix
+from research.ic.study import forward_returns, return_matrix
 from research.ic.robustness import MIN_NAMES, START, leg_returns, membership_turnover
 from research.ic.statistics import bh as _bh, hac_t, rank_corr as _rank_corr
 

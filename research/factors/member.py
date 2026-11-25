@@ -384,3 +384,94 @@ def symbol_factors(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,
         sticky_net_share(tables, market),
         spider_signal(tables, active_only=True).rename("SPIDER_ACTIVE_PROXY"),
     ], axis=1)
+
+
+# ---------------------------------------------------------------- 2011–2021 扩展会员分组与持仓流
+
+FACTOR_META: dict[str, dict[str, str | int]] = {}
+
+
+def _register(name: str, family: str, description: str, sign: int = 1) -> None:
+    FACTOR_META[name] = {"family": family, "sign": sign, "description": description}
+
+
+for _name, _description in (
+    ("STICKY_NET_SHARE", "Visible net/gross of seats below market turnover, including undisclosed volume."),
+    ("SPEC_NET_SHARE", "Visible net/gross of seats at or above market turnover."),
+):
+    _register(_name, "baseline", _description)
+
+for _name, _description in (
+    ("RUN_LONG", "Net/gross of currently held seats present for at least 20 consecutive ranked days."),
+    ("DIR_STABLE", "Net/gross with absolute mean visible-net sign at least .8 over 20 consecutive holding days."),
+):
+    _register(_name, "profile", _description)
+
+for _name, _description in (
+    ("FLOW_CONTROL", "Disclosed aggregate long change minus short change / market open interest."),
+    ("FLOW_CHANGE5", "FLOW_CONTROL minus its value five sessions earlier."),
+    ("FLOW_MA5", "Five-day mean of FLOW_CONTROL with five valid observations."),
+    ("NEG_SHORT_FLOW", "Negative disclosed aggregate short change / market open interest."),
+):
+    _register(_name, "flow", _description)
+
+for _pct in ("00", "50", "80", "100"):
+    for _group in ("STICKY", "SPEC"):
+        _register(f"IMP{_pct}_{_group}", "imputation",
+                  f"Net/gross after missing-side fill at {_pct}% of its daily disclosed minimum; original {_group.lower()} membership fixed.")
+
+
+def _impute(long: pd.DataFrame, short: pd.DataFrame,
+            fraction: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if fraction == 0:
+        return long.fillna(0.0), short.fillna(0.0)
+    long_fill = long.min(axis=1) * fraction
+    short_fill = short.min(axis=1) * fraction
+    return (long.mask(long.isna() & short.notna(), long_fill, axis=0),
+            short.mask(short.isna() & long.notna(), short_fill, axis=0))
+
+
+def profile_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:
+    """在固定日期网格上计算连续上榜、方向稳定、四档插补与持仓流因子（纯因子计算，无外部读写）。"""
+    index = market.index
+    if not index.is_unique or not index.is_monotonic_increasing:
+        raise ValueError("market dates must be unique and increasing")
+    columns = tables["L"].columns
+    for key in ("S", "V", "dL", "dS"):
+        columns = columns.union(tables[key].columns, sort=False)
+    ranked = tables["ranked"].reindex(index).fillna(False).astype(bool)
+    t = {key: tables[key].reindex(index=index, columns=columns).astype(float)
+         for key in ("L", "S", "V", "dL", "dS")}
+    t = {key: value.where(np.isfinite(value)).where(ranked, axis=0) for key, value in t.items()}
+    t["ranked"] = ranked
+    m = market[["oi", "volume"]].astype(float)
+    m = m.where(np.isfinite(m))
+    valid = ranked & m["oi"].gt(0) & m["volume"].gt(0)
+    long, short = t["L"], t["S"]
+    net, gross, sticky, spec = seat_turnover_groups(t, m)
+    held = gross.gt(0) & ranked.to_numpy()[:, None]
+    presence = (long.notna() | short.notna()) & ranked.to_numpy()[:, None]
+    out = dict(sticky_net_share(t, m))
+
+    streak = np.zeros(presence.shape, dtype=np.int64)
+    present_array = presence.to_numpy()
+    for row in range(len(index)):
+        streak[row] = np.where(present_array[row], (streak[row - 1] if row else 0) + 1, 0)
+    run = pd.DataFrame(streak, index=index, columns=columns)
+    out["RUN_LONG"] = net_gross_share(net, gross, held & run.ge(20))
+    direction = np.sign(net).where(presence).rolling(20, min_periods=20).mean().abs()
+    out["DIR_STABLE"] = net_gross_share(net, gross, held & direction.ge(0.8))
+
+    for pct in (0, 50, 80, 100):
+        filled_long, filled_short = _impute(long, short, pct / 100)
+        filled_net, filled_gross = filled_long - filled_short, filled_long + filled_short
+        for group, mask in (("STICKY", sticky), ("SPEC", spec)):
+            out[f"IMP{pct:02d}_{group}"] = net_gross_share(filled_net, filled_gross, mask, require_complete=True)
+
+    flow = daily_position_flow(t, m["oi"]).where(valid)
+    out["FLOW_CONTROL"] = flow
+    out["FLOW_MA5"] = flow.rolling(5, min_periods=5).mean()
+    out["FLOW_CHANGE5"] = flow.diff(5)
+    oi = m["oi"].where(m["oi"].gt(0))
+    out["NEG_SHORT_FLOW"] = -disclosed_change_sum(t, "S") / oi
+    return pd.DataFrame(out, index=index).reindex(columns=FACTOR_META).where(valid, axis=0)

@@ -395,3 +395,20 @@ def test_contract_specifications_do_not_depend_on_commission_history(tmp_path, m
     assert later[days[4]][contract].close_fee == 3.
     assert later[days[4]][contract].fee_source_date == days[2]
     assert later[days[4]][contract].fee_carried
+
+
+def test_engine_extended_window_uses_2010_warmup_and_routes_to_research(monkeypatch):
+    dates = pd.bdate_range("2010-01-04", "2011-01-10")
+    panel = pd.DataFrame({"date": dates, "symbol": "AA", "c1_contract": "AA1105"})
+    seen = {}
+
+    monkeypatch.setattr(P.D, "load_panel", lambda: panel)
+    monkeypatch.setattr(P.D, "load_contracts_span", lambda part, **kw: seen.update(span=part, kw=kw) or pd.DataFrame())
+    monkeypatch.setattr(P.C, "assert_research_only", lambda p: None)
+    monkeypatch.setattr(P.pd, "read_csv", lambda *a, **kw: pd.DataFrame({"trading_date": dates[:2]}))
+
+    got_panel, _, _, start, _, data_partition, _ = P._partition_inputs("research_2011_2021")
+    assert start == P.EXTENDED_START
+    assert data_partition == "research"
+    assert seen["span"] == "research" and seen["kw"] == {"for_execution": True}
+    assert got_panel["date"].min() == P.WARMUP_START

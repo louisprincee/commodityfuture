@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
-import data as D
-from research.factors import member_tables, sticky_net_share
+from src import data as D
+from research.factors.member import member_tables, sticky_net_share
 from research.member.complementarity import ranked_halves, sticky_quintiles
 from research.factors.price import load_price_factors
 from strategies import Targets

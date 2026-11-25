@@ -42,7 +42,7 @@ def test_basis_momentum_needs_full_window_on_both_contracts():
 
 
 def test_sticky_net_share_keeps_low_turnover_and_one_sided_seats():
-    from research.factors import sticky_net_share
+    from research.factors.member import sticky_net_share
 
     days = pd.bdate_range("2020-01-01", periods=2)
     cols = ["STICKY_LONG", "ONE_SIDED_SHORT", "CHURNER"]

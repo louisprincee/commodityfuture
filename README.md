@@ -32,16 +32,16 @@
 ## 运行
 
 ```bash
-python -m research panel
-python -m research member-ic --jobs 8
-python -m research paper-ic --jobs 8
-python -m research five-day-ic --jobs 8
-python -m research candidate-ic
-python -m research xs-robustness
-python -m research chain-ic --jobs 8
-python -m research member-smoothing --jobs 8
-python -m research member-complementarity --jobs 8
-python -m research plot-ic
+python -m src.data
+python -m research.ic.study member-ic --jobs 8
+python -m research.ic.study paper-ic --jobs 8
+python -m research.ic.study five-day-ic --jobs 8
+python -m research.ic.economic
+python -m research.ic.robustness
+python -m research.member.chain --jobs 8
+python -m research.member.smoothing --jobs 8
+python -m research.member.complementarity --jobs 8
+python -m research.ic.plot
 python -m backtest.engine --research --jobs 8
 python -m backtest.engine --family member --oos --jobs 8
 python -m backtest.engine --start 2016 --end 2025

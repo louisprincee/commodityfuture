@@ -7,8 +7,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-import config as C
-import data as D
+from src import config as C
+from src import data as D
 from research.settings import CONSISTENCY as CS, CROWDING as CR
 
 NET_WINDOWS = (10, 20, 60, 120)

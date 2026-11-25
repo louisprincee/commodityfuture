@@ -11,7 +11,7 @@ import sys
 import pandas as pd
 
 from download.getExternal import C, CoverageCache, rqdata_credentials
-import data as D  # noqa: E402
+from src import data as D  # noqa: E402
 
 FIELDS = [
     "long_margin_ratio", "short_margin_ratio", "commission_type", "open_commission",

@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import config as C
-import data as D
+from src import config as C
+from src import data as D
 
 
 def test_partition_guards_seal_paths_and_dates():
@@ -140,7 +140,7 @@ def test_eligibility_requires_full_242_day_liquidity_window():
 
 
 def test_to_single_sided_halves_only_before_2020():
-    import data as D
+    from src import data as D
 
     frame = pd.DataFrame({
         "date": pd.to_datetime(["2019-12-31", "2020-01-02"]),
@@ -193,7 +193,7 @@ def test_download_rejects_financial_futures():
 
 def test_execution_parameters_partition_guards():
     from download import getExecutionParameters as gep
-    import config as C
+    from src import config as C
 
     assert gep.PARTITION_CACHE["oos"] == C.OOS_EXECUTION_PARAMETERS
     gep._check_dates(pd.to_datetime(["2021-12-31"]), "research", "test")

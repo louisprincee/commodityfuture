@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import argparse
 from functools import reduce
 from math import erfc, sqrt
 from operator import mul
@@ -13,9 +14,9 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
-import config as C
-import data as D
-from research import factors as F
+from src import config as C
+from src import data as D
+from research.factors.member import kaiyuan_active, symbol_factors
 from research.settings import XS_POSITION as XS
 
 LABEL_FIELDS = ("entry_date", "exit_date", "entry_contract", "entry_open", "exit_open", "forward_return")
@@ -144,8 +145,8 @@ def _one_symbol_paper(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,
     if not ranks.empty:
         ranks = ranks.loc[ranks["rank"].between(1, 20)]
     position_ranks = ranks.loc[ranks.side.ne("volume")] if not ranks.empty else ranks
-    result = F.symbol_factors(symbol, panel, contracts, dates, position_ranks)
-    return result.join(F.kaiyuan_active(ranks, dates)[["SPIDER_ACTIVE", "SPIDER_SAME_COVERAGE"]])
+    result = symbol_factors(symbol, panel, contracts, dates, position_ranks)
+    return result.join(kaiyuan_active(ranks, dates)[["SPIDER_ACTIVE", "SPIDER_SAME_COVERAGE"]])
 
 
 # ---------------------------------------------------------------- 1) member-ic
@@ -367,3 +368,21 @@ def run_five_day_ic(panel: pd.DataFrame, out: Path, jobs: int) -> None:
     ic = _ic_summary_5d(scores, outcomes, sectors)
     ic.to_csv(out / "five_day_ic.csv", index=False)
     print(f"预测检验完成：{len(ic)} 项，结果写入 {out}", flush=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="运行会员持仓或截面 IC 研究")
+    parser.add_argument("study", choices=("member-ic", "paper-ic", "five-day-ic"))
+    parser.add_argument("--jobs", type=int, default=8)
+    args = parser.parse_args()
+    panel = D.load_panel()
+    if args.study == "member-ic":
+        run_member_ic(panel, C.study_dir("member_ic"), jobs=args.jobs)
+    elif args.study == "paper-ic":
+        run_paper_ic(panel, C.study_dir("xs_position"), jobs=args.jobs)
+    else:
+        run_five_day_ic(panel, C.study_dir("xs_position"), jobs=args.jobs)
+
+
+if __name__ == "__main__":
+    main()

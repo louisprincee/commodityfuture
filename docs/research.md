@@ -340,11 +340,11 @@ $$
 ## 附录 C · 复现
 
 ```bash
-python -m research member-ic --jobs 4
-python -m research xs-robustness
-python -m research member-smoothing --jobs 4
-python -m research member-complementarity --jobs 4
-python -m research chain-ic --jobs 4
+python -m research.ic.study member-ic --jobs 4
+python -m research.ic.robustness
+python -m research.member.smoothing --jobs 4
+python -m research.member.complementarity --jobs 4
+python -m research.member.chain --jobs 4
 python -m backtest.engine --family member --research
 python -m backtest.engine --family member --oos
 python -m backtest.engine --start 2016 --end 2025

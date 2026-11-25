@@ -29,15 +29,16 @@
 """
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-import config as C
-import data as D
-from research import factors as F
+from src import config as C
+from src import data as D
+from research.factors.member import market_inputs, member_tables, sticky_net_share
 from research.factors.price import basis_momentum, rolling_skew
 from research.ic.economic import candidate_factors
 from research.ic.study import _bh, _rank_corr, forward_returns, return_matrix
@@ -175,9 +176,9 @@ def seat_purified_scores(panel: pd.DataFrame,
     for sym in symbols:
         if not (rank_root / f"{sym}_long.pkl").is_file():
             continue
-        mkt = F.market_inputs(panel, sym).reindex(dates)
-        tables = F.member_tables(sym, dates, top20=True, partition="research")
-        split = F.sticky_net_share(tables, mkt)
+        mkt = market_inputs(panel, sym).reindex(dates)
+        tables = member_tables(sym, dates, top20=True, partition="research")
+        split = sticky_net_share(tables, mkt)
         sticky[sym] = split["STICKY_NET_SHARE"]
         spec[sym] = split["SPEC_NET_SHARE"]
     sample = dates[dates >= START]
@@ -362,3 +363,13 @@ def run(out: Path, member_path: Path | None = None) -> pd.DataFrame:
     seat_out.to_csv(out / "seat_purified.csv", index=False)
     pd.DataFrame({f"{k}_d{h}": v for (k, h), v in daily_ic.items()}).to_csv(out / "daily_ic.csv", index_label="date")
     return result
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="运行截面因子稳健性检验")
+    parser.parse_args()
+    run(C.study_dir("xs_robustness"))
+
+
+if __name__ == "__main__":
+    main()

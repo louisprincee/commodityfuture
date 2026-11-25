@@ -1,13 +1,14 @@
 """绘制主要因子 IC 与多重检验结果。"""
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-import config as C
+from src import config as C
 from research.ic.study import _bh
 
 
@@ -202,3 +203,14 @@ def plot_factor_significance(xs_dir: Path, member_dir: Path, output: Path) -> Pa
 
 def run(xs_dir: Path, member_dir: Path, output: Path) -> Path:
     return plot_factor_significance(xs_dir, member_dir, output)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="绘制因子 IC 显著性图")
+    parser.parse_args()
+    output = C.study_dir("xs_position") / "factor_significance.png"
+    print(f"因子显著性图写入 {run(C.study_dir('xs_position'), C.study_dir('member_ic'), output)}")
+
+
+if __name__ == "__main__":
+    main()

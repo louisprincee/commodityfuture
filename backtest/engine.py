@@ -22,8 +22,8 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-import config as C  # noqa: E402
-import data as D  # noqa: E402
+from src import config as C  # noqa: E402
+from src import data as D  # noqa: E402
 from costs import load_market  # noqa: E402
 from research.settings import XS_POSITION  # noqa: E402
 from strategies import Targets, sticky_chain, sticky_core, sticky_core_h20, sticky_only  # noqa: E402

@@ -19,7 +19,7 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
-import config as C  # noqa: E402
+from src import config as C  # noqa: E402
 from rq_auth import rqdata_credentials  # noqa: E402
 
 FIELDS = ["commission_type", "open_commission", "close_commission", "close_commission_today"]

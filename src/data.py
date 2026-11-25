@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import config as C
+from src import config as C
 
 def external_root(partition: str) -> Path:
     return C.daily_dir(partition)
@@ -444,3 +444,11 @@ def load_evaluation_panel() -> pd.DataFrame:
     evaluation = panel.loc[panel["date"].ge(pd.Timestamp(C.OOS_START)), "date"]
     C.assert_oos_dates(evaluation, "样本外日面板")
     return panel
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="构建研究期日面板缓存")
+    parser.parse_args()
+    build_panel_cache()

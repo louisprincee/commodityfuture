@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import argparse
 from math import erfc, sqrt
 from pathlib import Path
 
@@ -14,9 +15,9 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
-import config as C
-import data as D
-from research.factors import daily_position_flow, member_tables, seat_turnover_groups
+from src import config as C
+from src import data as D
+from research.factors.member import daily_position_flow, member_tables, seat_turnover_groups
 from research.ic.study import _bh, _rank_corr, forward_returns, return_matrix
 from research.ic.robustness import MIN_NAMES, START, hac_t, leg_returns, membership_turnover
 
@@ -141,3 +142,16 @@ def run(out: Path, jobs: int) -> pd.DataFrame:
         index=["signal_date", "symbol"]
     ).to_csv(out / "flow_signals.csv")
     return result
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="运行会员席位平滑研究")
+    parser.add_argument("--jobs", type=int, default=8)
+    args = parser.parse_args()
+    out = C.study_dir("member_smoothing")
+    result = run(out, args.jobs)
+    print(f"{len(result)} 项 IC 写入 {out}")
+
+
+if __name__ == "__main__":
+    main()

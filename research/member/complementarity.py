@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import argparse
 from math import erfc, sqrt
 from pathlib import Path
 
@@ -16,9 +17,9 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
-import config as C
-import data as D
-from research.factors import member_tables, seat_turnover_groups
+from src import config as C
+from src import data as D
+from research.factors.member import member_tables, seat_turnover_groups
 from research.ic.study import _bh, forward_returns, return_matrix
 from research.ic.robustness import START, hac_t
 
@@ -130,3 +131,16 @@ def run(out: Path, jobs: int) -> pd.DataFrame:
     result.to_csv(out / "conditional_tests.csv", index=False)
     daily.rename_axis(index="date").to_csv(out / "daily_contrasts.csv")
     return result
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="运行会员持仓互补研究")
+    parser.add_argument("--jobs", type=int, default=8)
+    args = parser.parse_args()
+    out = C.study_dir("member_complementarity")
+    result = run(out, args.jobs)
+    print(f"{len(result)} 项持仓条件价差写入 {out}")
+
+
+if __name__ == "__main__":
+    main()

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import config as C
+from src import config as C
 
 BROKER_MARGIN_ADDON = 0.03
 VOLUME_FRACTION = 0.01

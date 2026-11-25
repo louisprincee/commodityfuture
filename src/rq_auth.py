@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import config as C
+from src import config as C
 
 ENV_PATH = C.CONFIG_DIR / "rqdata.env"
 

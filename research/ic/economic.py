@@ -1,14 +1,15 @@
 """经济先验商品因子：期限结构、12-1 月动量与仓单变化的研究期 IC 检验。"""
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
 
-import config as C
-import data as D
+from src import config as C
+from src import data as D
 from research.ic.study import (
     MIN_DAYS,
     _bh,
@@ -188,3 +189,13 @@ def run(panel: pd.DataFrame, out: Path) -> None:
     result.to_csv(out / "candidate_ic.csv", index=False)
     print(result.round(5).to_string(index=False))
     print(f"候选因子检验结果写入 {out / 'candidate_ic.csv'}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="运行经济先验因子 IC 研究")
+    parser.parse_args()
+    run(D.load_panel(), C.study_dir("economic_ic"))
+
+
+if __name__ == "__main__":
+    main()

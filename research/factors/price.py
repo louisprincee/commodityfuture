@@ -4,8 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-import config as C
-import data as D
+from src import config as C
+from src import data as D
 
 
 def basis_momentum(ret1: pd.DataFrame, ret2: pd.DataFrame, window: int = 242) -> pd.DataFrame:

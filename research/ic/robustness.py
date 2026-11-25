@@ -41,7 +41,8 @@ from src import data as D
 from research.factors.member import market_inputs, member_tables, sticky_net_share
 from research.factors.price import basis_momentum, rolling_skew
 from research.ic.economic import candidate_factors
-from research.ic.study import _bh, _rank_corr, forward_returns, return_matrix
+from research.ic.labels import forward_returns, return_matrix
+from research.ic.statistics import bh as _bh, hac_t, rank_corr as _rank_corr
 
 HORIZONS = (5, 10, 20)
 JUDGE_H = 10
@@ -54,18 +55,6 @@ SIGNS = {
     "K_DB_OI": 1, "NEG_K_DS_OI": 1, "FLOW_CONTROL": 1, "K_NET_SHARE": 1,
 }
 FAMILY = {name: ("economic" if i < 4 else "member") for i, name in enumerate(SIGNS)}
-
-
-def hac_t(series: pd.Series, lags: int) -> float:
-    x = series.dropna()
-    n = len(x)
-    if n < 120:
-        return np.nan
-    resid = (series - x.mean()).fillna(0).to_numpy()
-    var = resid @ resid
-    for lag in range(1, lags + 1):
-        var += 2 * (1 - lag / (lags + 1)) * (resid[lag:] @ resid[:-lag])
-    return x.mean() * n / math.sqrt(var) if var > 0 else np.nan
 
 
 def leg_returns(score: pd.DataFrame, label: pd.DataFrame, tail: float = TAIL) -> pd.DataFrame:

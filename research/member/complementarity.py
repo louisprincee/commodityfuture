@@ -20,8 +20,9 @@ from joblib import Parallel, delayed
 from src import config as C
 from src import data as D
 from research.factors.member import member_tables, seat_turnover_groups
-from research.ic.study import _bh, forward_returns, return_matrix
-from research.ic.robustness import START, hac_t
+from research.ic.labels import forward_returns, return_matrix
+from research.ic.robustness import START
+from research.ic.statistics import bh as _bh, hac_t
 
 HOLD = 5
 MIN_NAMES = 20
@@ -69,16 +70,16 @@ def _seat_state(symbol, dates, market, partition):
     return pd.DataFrame({"sticky": sticky_net / sticky_gross, "size": sticky_gross / visible_gross})
 
 
-def load_seat_inputs(panel: pd.DataFrame, jobs: int, *, partition: str):
+def load_seat_inputs(panel: pd.DataFrame, jobs: int, *, partition: str, start=None):
     """从会员榜加载流动性池内的粘性净多、席位份额和主力映射。"""
     if partition == "research":
-        start = START
+        start = START if start is None else pd.Timestamp(start)
         C.assert_no_holdout_dates(panel["date"], "持仓互补研究日面板")
     elif partition == "oos":
-        start = pd.Timestamp(C.OOS_START)
+        start = pd.Timestamp(C.OOS_START) if start is None else pd.Timestamp(start)
         C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "持仓互补样本外日面板")
     elif partition == "combined":
-        start = START
+        start = START if start is None else pd.Timestamp(start)
     else:
         raise ValueError(f"未知分区 {partition}")
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])

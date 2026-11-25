@@ -43,9 +43,27 @@ def member_tables(symbol: str, dates: pd.DatetimeIndex, *, top20: bool = False,
     return out
 
 
+def disclosed_change_sum(tables: dict[str, pd.DataFrame], side: str,
+                         *, active_only: bool = False) -> pd.Series:
+    """合计实际持仓榜记录的变动；任一应披露记录缺失则该侧合计未知。
+
+    未上该侧持仓榜的席位不参与。活跃口径另要求同日上成交榜。
+    """
+    if side not in ("L", "S"):
+        raise ValueError("side must be L or S")
+    holdings = tables[side]
+    expected = holdings.notna()
+    if active_only:
+        expected &= tables["V"].reindex_like(holdings).notna()
+    changes = tables[f"d{side}"].reindex_like(holdings)
+    changes = changes.where(np.isfinite(changes))
+    complete = (~expected | changes.notna()).all(axis=1)
+    return changes.where(expected).sum(axis=1, min_count=1).where(expected.any(axis=1) & complete)
+
+
 def daily_position_flow(tables: dict[str, pd.DataFrame], oi: pd.Series) -> pd.Series:
     """品种榜披露的净持仓变化，以品种单边总持仓归一化。"""
-    flow = tables["dL"].sum(axis=1, min_count=1) - tables["dS"].sum(axis=1, min_count=1)
+    flow = disclosed_change_sum(tables, "L") - disclosed_change_sum(tables, "S")
     return (flow / oi.where(oi.gt(0))).rename("FLOW_CONTROL")
 
 
@@ -72,7 +90,8 @@ def seat_turnover_groups(t: dict[str, pd.DataFrame], mkt: pd.DataFrame):
     L = t["L"].fillna(0.0)
     S = t["S"].fillna(0.0)
     V = t["V"].fillna(0.0)
-    has_day = t["ranked"].to_numpy(dtype=bool)[:, None]
+    valid_market = np.isfinite(mkt["oi"]) & mkt["oi"].gt(0) & np.isfinite(mkt["volume"]) & mkt["volume"].gt(0)
+    has_day = (t["ranked"] & valid_market).to_numpy(dtype=bool)[:, None]
     gross = L + S
     net = L - S
     oi = mkt["oi"].where(mkt["oi"] > 0)
@@ -83,19 +102,74 @@ def seat_turnover_groups(t: dict[str, pd.DataFrame], mkt: pd.DataFrame):
     return net, gross, sticky, spec
 
 
+def net_gross_share(net: pd.DataFrame, gross: pd.DataFrame, mask: pd.DataFrame,
+                    *, require_complete: bool = False) -> pd.Series:
+    """掩码内可见净头寸占总持仓比例；分母非正时返回缺失。"""
+    num = net.where(mask).sum(axis=1, min_count=1)
+    den = gross.where(mask).sum(axis=1, min_count=1)
+    result = num / den.where(den.gt(0))
+    if require_complete:
+        result = result.where((~mask | (net.notna() & gross.notna())).all(axis=1))
+    return result
+
+
 def sticky_net_share(t: dict[str, pd.DataFrame], mkt: pd.DataFrame) -> pd.DataFrame:
     """按 CROWD1 换手门槛拆分粘性持仓席位（STICKY_NET_SHARE）与高换手活跃席位（SPEC_NET_SHARE）。"""
     net, gross, sticky, spec = seat_turnover_groups(t, mkt)
-
-    def share(mask: pd.DataFrame) -> pd.Series:
-        num = net.where(mask).sum(axis=1, min_count=1)
-        den = gross.where(mask).sum(axis=1, min_count=1)
-        return num / den.where(den.gt(0))
-
     return pd.DataFrame({
-        "STICKY_NET_SHARE": share(sticky),
-        "SPEC_NET_SHARE": share(spec),
+        "STICKY_NET_SHARE": net_gross_share(net, gross, sticky),
+        "SPEC_NET_SHARE": net_gross_share(net, gross, spec),
     }, index=net.index)
+
+
+def load_sticky_inputs(panel: pd.DataFrame, start: pd.Timestamp, partition: str,
+                       jobs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """共用品种池内的粘性净多与主力映射；完整历史计算后再截取开户日。"""
+    signals, dominant = _load_member_signals(panel, start, partition, jobs, with_flow=False)
+    return signals["STICKY_NET_SHARE"], dominant
+
+
+def load_sticky_flow_inputs(panel: pd.DataFrame, start: pd.Timestamp, jobs: int):
+    """研究期粘性、披露净流及流的秩残差；只产出信号，不形成仓位。"""
+    from research.ic.statistics import rank_residual
+
+    signals, dominant = _load_member_signals(panel, start, "research", jobs, with_flow=True)
+    sticky, flow = signals["STICKY_NET_SHARE"], signals["FLOW_CONTROL"]
+    return sticky, flow, rank_residual(flow, sticky), dominant
+
+
+def _load_member_signals(panel, start, partition, jobs, *, with_flow):
+    from joblib import Parallel, delayed
+
+    start = pd.Timestamp(start)
+    if partition == "research":
+        C.assert_no_holdout_dates(panel["date"], "粘性净多日面板")
+    elif partition == "oos":
+        C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "粘性净多样本外日面板")
+    elif partition != "combined":
+        raise ValueError(f"未知分区 {partition}")
+    eligible, dominant = D.member_universe(panel, start, partition)
+    volume = panel.pivot(index="date", columns="symbol", values="volume_total")
+    oi = panel.pivot(index="date", columns="symbol", values="oi_total")
+
+    def one_symbol(symbol):
+        tables = member_tables(symbol, eligible.index, top20=True, partition=partition)
+        market = pd.DataFrame({"volume": volume[symbol], "oi": oi[symbol]}, index=eligible.index)
+        result = sticky_net_share(tables, market)[["STICKY_NET_SHARE"]]
+        if with_flow:
+            valid = (tables["ranked"] & np.isfinite(market["oi"]) & market["oi"].gt(0)
+                     & np.isfinite(market["volume"]) & market["volume"].gt(0))
+            result["FLOW_CONTROL"] = daily_position_flow(tables, market["oi"]).where(valid)
+        return result
+
+    values = Parallel(n_jobs=jobs, prefer="threads")(
+        delayed(one_symbol)(symbol) for symbol in eligible.columns)
+    signals = {}
+    for name in (["STICKY_NET_SHARE", "FLOW_CONTROL"] if with_flow else ["STICKY_NET_SHARE"]):
+        matrix = pd.DataFrame({symbol: value[name] for symbol, value in zip(eligible.columns, values)},
+                              index=eligible.index, columns=eligible.columns)
+        signals[name] = matrix.where(eligible).loc[start:]
+    return signals, dominant
 
 
 def crowding(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:
@@ -219,11 +293,8 @@ def xingye_consistency(net: pd.DataFrame, suffix: str, window: int) -> pd.DataFr
 
 def spider_signal(t: dict[str, pd.DataFrame], active_only: bool) -> pd.Series:
     """品种级蜘蛛网代理：前 20 名多单增量 dB > 0 且空单增量 dS < 0 看多，反之看空。"""
-    dL, dS = t["dL"], t["dS"]
-    if active_only:
-        dL, dS = dL.where(t["V"].notna()), dS.where(t["V"].notna())
-    db = dL.sum(axis=1, min_count=1)
-    ds = dS.sum(axis=1, min_count=1)
+    db = disclosed_change_sum(t, "L", active_only=active_only)
+    ds = disclosed_change_sum(t, "S", active_only=active_only)
     sig = pd.Series(0.0, index=db.index)
     sig[(db > 0) & (ds < 0)] = 1.0
     sig[(db < 0) & (ds > 0)] = -1.0
@@ -240,7 +311,9 @@ def kaiyuan(ranks: pd.DataFrame, contracts: pd.DataFrame, calendar: pd.DatetimeI
         keys = ["trading_date", "contract"]
         both = ranks.groupby(keys)["side"].transform("nunique").eq(2)
         visible = ranks.loc[both]
-        totals = visible.groupby(["trading_date", "side"])[fields].sum(min_count=1).unstack("side")
+        grouped = visible.groupby(["trading_date", "side"])
+        complete = grouped[fields].count().eq(grouped.size(), axis=0)
+        totals = grouped[fields].sum(min_count=1).where(complete).unstack("side")
         totals = totals.reindex(index=calendar, columns=pd.MultiIndex.from_product([fields, ["long", "short"]]))
         disclosed = visible[keys].drop_duplicates().merge(
             contracts[["date", "contract", "open_interest"]], left_on=keys,

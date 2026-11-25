@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import sys
 
 import pandas as pd
 
-from download.getExternal import C, CoverageCache, rqdata_credentials
+from download.getExternal import C, CoverageCache, parse_day, rqdata_credentials
 from src import data as D  # noqa: E402
 
 FIELDS = [
@@ -57,15 +59,19 @@ def _price_limits(rq, contract, left, right, partition: str = "research"):
     return out.set_index("date")[fields].sort_index()
 
 
-def contract_spans(partition: str) -> pd.DataFrame:
-    start = PARTITION_START[partition]
+def contract_spans(partition: str, start=None, end=None) -> pd.DataFrame:
+    start = PARTITION_START[partition] if start is None else pd.Timestamp(start)
+    end = pd.Timestamp(C.PARTITION_WINDOWS[partition][1]) if end is None else pd.Timestamp(end)
+    _check_dates([start, end], partition, "执行参数请求")
+    if start > end or start < pd.Timestamp(C.PARTITION_WINDOWS[partition][0]):
+        raise ValueError("执行参数请求日期越出分区或起止倒置")
     wanted = set()
     for symbol in D.symbols_with_data(partition):
         dom = D.load_dominant(symbol, 1, partition)
-        wanted.update(dom.loc[dom.index >= start].dropna().unique())
-    bars = D.load_contracts(partition)[["contract", "date"]]
+        wanted.update(dom.loc[(dom.index >= start) & (dom.index <= end)].dropna().unique())
+    bars = D.load_contracts(partition, for_execution=True)[["contract", "date"]]
     return (
-        bars.loc[bars["contract"].isin(wanted) & bars["date"].ge(start)]
+        bars.loc[bars["contract"].isin(wanted) & bars["date"].between(start, end)]
         .groupby("contract")["date"]
         .agg(["min", "max"])
     )
@@ -75,15 +81,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--partition", choices=list(PARTITION_CACHE), default="research")
     parser.add_argument("--price-limits-only", action="store_true")
+    parser.add_argument("--start-date", type=parse_day, help="可选；默认保留既有分区起点")
+    parser.add_argument("--end-date", type=parse_day, help="可选；不得越出所选分区")
     args = parser.parse_args()
+    spans = contract_spans(args.partition, args.start_date, args.end_date)
     credentials = rqdata_credentials()
     if not credentials:
         print("交易参数缺少米筐配置", file=sys.stderr)
         return 1
     import rqdatac as rq
 
-    rq.init(*credentials)
-    spans = contract_spans(args.partition)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        rq.init(*credentials)
     cache_dir = PARTITION_CACHE[args.partition]
     if args.partition == "research":
         C.assert_research_only(cache_dir)

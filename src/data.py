@@ -36,10 +36,11 @@ def to_single_sided(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_contracts(partition: str = "research") -> pd.DataFrame:
+def load_contracts(partition: str = "research", *, for_execution: bool = False) -> pd.DataFrame:
     """全部商品合约日行情，长表：contract、date、symbol 与价格/量/持仓字段。
 
-    成交量、成交额与持仓量统一为单边口径。
+    成交量、成交额与持仓量统一为单边口径。执行时保留更名后仍存续的旧合约，
+    供已有持仓估值和平仓；面板统计沿用更名前的品种拼接口径。
     """
     root = external_root(partition) / "contracts"
     _guard(root, partition)
@@ -59,7 +60,7 @@ def load_contracts(partition: str = "research") -> pd.DataFrame:
     if out.duplicated(["contract", "date"]).any():
         raise ValueError("合约日行情有重复 (contract, date)")
     if partition == "research":
-        out = apply_legacy_contracts(out)
+        out = apply_legacy_contracts(out, for_execution=for_execution)
     _check_dates(out["date"], partition, "合约日行情")
     out = to_single_sided(out)
     return out.sort_values(["symbol", "contract", "date"], kind="mergesort").reset_index(drop=True)
@@ -80,13 +81,16 @@ def legacy_sources(symbol: str) -> list[tuple[str, pd.Timestamp]]:
     return [(old, cut) for old, (new, cut) in LEGACY_UNDERLYING.items() if new == symbol]
 
 
-def apply_legacy_contracts(frame: pd.DataFrame) -> pd.DataFrame:
-    """把更名前合约并入后继品种；切换日及之后的旧代码行不保留。"""
+def apply_legacy_contracts(frame: pd.DataFrame, *, for_execution: bool = False) -> pd.DataFrame:
+    """统一品种标签；执行行情必须保留旧合约至其实际行情结束。"""
     if frame.empty or not frame["symbol"].isin(LEGACY_UNDERLYING).any():
         return frame
     kept = [frame.loc[~frame["symbol"].isin(LEGACY_UNDERLYING)]]
     for old, (new, cut) in LEGACY_UNDERLYING.items():
-        part = frame.loc[frame["symbol"].eq(old) & frame["date"].lt(cut)].copy()
+        selected = frame["symbol"].eq(old)
+        if not for_execution:
+            selected &= frame["date"].lt(cut)
+        part = frame.loc[selected].copy()
         if part.empty:
             continue
         part["symbol"] = new
@@ -394,14 +398,14 @@ def load_panel() -> pd.DataFrame:
     return panel
 
 
-def load_contracts_span(partition: str = "research") -> pd.DataFrame:
+def load_contracts_span(partition: str = "research", *, for_execution: bool = False) -> pd.DataFrame:
     """研究期只读研究分区。样本外评价把研究期合约接到样本外之前，供滚动窗口预热。"""
     if partition == "research":
-        return load_contracts("research")
+        return load_contracts("research", for_execution=for_execution)
     if partition != "oos":
         raise ValueError(f"未知分区 {partition}")
-    research = load_contracts("research")
-    oos = load_contracts("oos")
+    research = load_contracts("research", for_execution=for_execution)
+    oos = load_contracts("oos", for_execution=for_execution)
     out = pd.concat([research, oos], ignore_index=True)
     if out.duplicated(["contract", "date"]).any():
         raise ValueError("合约日行情在研究期与样本外分区重复")

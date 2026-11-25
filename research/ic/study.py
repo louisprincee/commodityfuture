@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 import argparse
-from functools import reduce
 from math import erfc, sqrt
-from operator import mul
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +16,8 @@ from src import config as C
 from src import data as D
 from research.factors.member import kaiyuan_active, symbol_factors
 from research.settings import XS_POSITION as XS
+from research.ic.labels import forward_open_returns, forward_returns, return_matrix
+from research.ic.statistics import bh as _bh, hac_t, rank_corr as _rank_corr
 
 LABEL_FIELDS = ("entry_date", "exit_date", "entry_contract", "entry_open", "exit_open", "forward_return")
 MIN_DAYS = 120
@@ -27,29 +27,6 @@ HORIZONS = {"d1": 1, "d5": 5}
 
 
 # ---------------------------------------------------------------- 公共工具
-
-def forward_open_returns(dominant: pd.Series, opens: pd.Series) -> pd.DataFrame:
-    """全市场交易日索引上，入场与退出都使用 t+1 的主力合约。"""
-    dates = dominant.index.to_series()
-    entry_day = dates.shift(-1)
-    exit_day = dates.shift(-2)
-    contract = dominant.shift(-1)
-    entry = opens.reindex(pd.MultiIndex.from_arrays([contract, entry_day])).to_numpy(dtype=float)
-    exit_price = opens.reindex(pd.MultiIndex.from_arrays([contract, exit_day])).to_numpy(dtype=float)
-    valid = np.isfinite(entry) & (entry > 0) & np.isfinite(exit_price) & (exit_price > 0)
-    returns = np.divide(exit_price, entry, out=np.full(len(dates), np.nan), where=valid) - 1
-    return pd.DataFrame({
-        "entry_date": entry_day, "exit_date": exit_day, "entry_contract": contract,
-        "entry_open": entry, "exit_open": exit_price, "forward_return": returns,
-    }, index=dominant.index)
-
-
-def forward_returns(returns: pd.DataFrame, horizon: int) -> pd.DataFrame:
-    """信号日之后连续 horizon 段主力开盘收益连乘，任何单日缺失则整段缺失。"""
-    if horizon < 1:
-        raise ValueError("累计收益窗口必须为正")
-    legs = (1 + returns.shift(-(1 + offset)) for offset in range(horizon))
-    return reduce(mul, legs) - 1
 
 
 def _signed(name: str) -> int:
@@ -84,59 +61,17 @@ def _factor_family(name: str) -> str:
     return "paper_signal" if _discrete(name) else "paper_indicator"
 
 
-def _rank_corr(score: pd.DataFrame, outcome: pd.DataFrame, min_names: int) -> tuple[pd.Series, pd.Series]:
-    paired = np.isfinite(score) & np.isfinite(outcome)
-    left = score.where(paired).rank(axis=1)
-    right = outcome.where(paired).rank(axis=1)
-    left = left.sub(left.mean(axis=1), axis=0)
-    right = right.sub(right.mean(axis=1), axis=0)
-    magnitude = np.sqrt(left.pow(2).sum(axis=1) * right.pow(2).sum(axis=1))
-    corr = (left * right).sum(axis=1) / magnitude.where(magnitude.gt(0))
-    count = paired.sum(axis=1)
-    return corr.where(count.ge(min_names)), count.where(corr.notna() & count.ge(min_names))
-
-
-def _hac_t(series: pd.Series) -> float:
-    finite = series.notna()
-    n = int(finite.sum())
-    if n < MIN_DAYS:
-        return np.nan
-    mean = series.mean()
-    resid = (series - mean).fillna(0).to_numpy()
-    var = np.dot(resid, resid)
-    for lag in range(1, HAC_LAGS + 1):
-        var += 2 * (1 - lag / (HAC_LAGS + 1)) * np.dot(resid[lag:], resid[:-lag])
-    return mean * n / np.sqrt(var) if var > 0 else np.nan
-
-
-def _bh(p: pd.Series) -> pd.Series:
-    ordered = p.dropna().sort_values()
-    adjusted = (ordered * len(ordered) / np.arange(1, len(ordered) + 1))[::-1].cummin()[::-1].clip(upper=1)
-    return adjusted.reindex(p.index)
 
 
 def _stats(ic: pd.Series, count: pd.Series) -> dict:
-    t = _hac_t(ic)
+    t = hac_t(ic, HAC_LAGS, MIN_DAYS)
     return {
-        "mean_ic": ic.mean(), "hac_t": t, "p": erfc(abs(t) / sqrt(2)),
+        "mean_ic": ic.mean(), "hac_t": t, "p": erfc(abs(t) / sqrt(2)) if np.isfinite(t) else np.nan,
         "days": ic.count(), "avg_names": count.mean(),
         "positive_fraction": ic.dropna().gt(0).mean(),
         "ic_2016_2018": ic.loc[:"2018-12-31"].mean(),
         "ic_2019_2021": ic.loc["2019-01-01":].mean(),
     }
-
-
-def return_matrix(contract_map: pd.DataFrame, bar_open: pd.Series) -> pd.DataFrame:
-    """逐合约匹配交易日开盘与下一交易日开盘，缺失日不跨越。"""
-    dates = contract_map.index
-    ids = contract_map.to_numpy().ravel()
-    entry_date = dates.to_numpy().repeat(len(contract_map.columns))
-    exit_date = dates.to_series().shift(-1).to_numpy().repeat(len(contract_map.columns))
-    entry = bar_open.reindex(pd.MultiIndex.from_arrays([ids, entry_date])).to_numpy()
-    exit_price = bar_open.reindex(pd.MultiIndex.from_arrays([ids, exit_date])).to_numpy()
-    valid = (entry > 0) & (exit_price > 0)
-    ret = np.divide(exit_price, entry, out=np.full(len(entry), np.nan), where=valid) - 1
-    return pd.DataFrame(ret.reshape(contract_map.shape), index=dates, columns=contract_map.columns)
 
 
 def _one_symbol_paper(symbol: str, panel: pd.DataFrame, contracts: pd.DataFrame,

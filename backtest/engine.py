@@ -5,12 +5,14 @@
     python -m backtest.engine --start 2016 --end 2025
     python -m backtest.engine --family member --start 2016 --end 2025
 
-默认运行 2016–2021 研究期。两类策略共用同一整数手引擎：member 只用会员持仓，
-member_price 加入价格因子。输出按类别存放在 runs/strategies/<类别>/ 下。
+默认运行 2016–2021 研究期。保留四套已有策略；member 与 member_price 分类管理，
+输出存放在 runs/strategies/member/ 下。策略源码均在 strategies/。
+2011–2021 批量运行使用根目录 run.py，输出与旧结果分开保存。
 """
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 import sys
 from math import floor, isfinite
 from pathlib import Path
@@ -26,7 +28,7 @@ from src import config as C  # noqa: E402
 from src import data as D  # noqa: E402
 from costs import load_market  # noqa: E402
 from research.settings import XS_POSITION  # noqa: E402
-from strategies import Targets, sticky_chain, sticky_core, sticky_core_h20, sticky_only  # noqa: E402
+from strategies import Targets, sticky_only, sticky_chain, sticky_core, sticky_core_h20  # noqa: E402
 from strategies.common import HORIZON, NAME_CAP, TARGET_MULTIPLIER  # noqa: E402
 
 CAPITAL_CNY = 10_000_000
@@ -37,6 +39,23 @@ FLAT_MARGIN = 0.20
 BENCHMARK_NAME_CAP = 0.10
 SLIPPAGE_TICKS = 1
 BACKTEST_START = pd.Timestamp(XS_POSITION["test_start"])
+LIQUIDATION_DAYS = 5
+
+
+class ExecutionFailure(RuntimeError):
+    """非交割账户无法在已知期限内依照成交约束退出。"""
+
+
+def exit_deadline(contract, quote, end):
+    """只使用实际合约条款与预定账户结束日，不从未来行情终点推断到期。"""
+    if pd.isna(quote.last_trading_date):
+        return None
+    delivery_month = pd.Timestamp(year=2000 + int(contract[-4:-2]), month=int(contract[-2:]), day=1)
+    one_day = timedelta(days=1)
+    dates = [pd.Timestamp(end), pd.Timestamp(quote.last_trading_date), delivery_month - one_day]
+    if pd.notna(quote.start_delivery_date):
+        dates.append(pd.Timestamp(quote.start_delivery_date) - one_day)
+    return min(dates)
 
 
 def lot_targets(weights, notionals, margins, limits, equity, margin_cap=MARGIN_CAP):
@@ -49,7 +68,8 @@ def lot_targets(weights, notionals, margins, limits, equity, margin_cap=MARGIN_C
 
 
 def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=True,
-             slippage_ticks=SLIPPAGE_TICKS, name_cap=BENCHMARK_NAME_CAP, margin_cap=MARGIN_CAP):
+             slippage_ticks=SLIPPAGE_TICKS, name_cap=BENCHMARK_NAME_CAP, margin_cap=MARGIN_CAP,
+             non_delivery=True):
     """按开盘标价和滑点成交，按结算价盯市。先平仓，之后才允许开仓。"""
     if capital <= 0 or slippage_ticks < 0 or not (0 < name_cap <= 1) or not (0 < margin_cap <= 1):
         raise ValueError("初始本金必须为正，滑点不得为负，单品种上限与保证金上限必须在 (0, 1] 内")
@@ -65,17 +85,24 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
         targets = long.mul(long_scale, axis=0) + short.mul(short_scale, axis=0)
     equity = float(capital)
     positions = {}
+    deadlines = {}
     ledger, fills = [], []
-    last_quote: dict[str, pd.Timestamp] = {}
-    for quoted_day, book in market.items():
-        for contract, quote in book.items():
-            if quote.settle > 0 and (contract not in last_quote or quoted_day > last_quote[contract]):
-                last_quote[contract] = quoted_day
     for i, day in enumerate(dates):
         quotes = market.get(day, {})
         prior_equity = equity
         day_pnl = daily_fee = slippage = turnover = 0.0
         cancelled = zero_rounded = blocked_rolls = stale = limit_rejections = 0
+        deadline_rejections = 0
+        if non_delivery:
+            for contract, quote in quotes.items():
+                if contract not in deadlines:
+                    deadline = exit_deadline(contract, quote, dates[-1])
+                    if deadline is not None:
+                        deadlines[contract] = (deadline, dates.searchsorted(deadline, side="right") - 1)
+            for contract in positions:
+                if deadlines[contract][1] < i:
+                    raise ExecutionFailure(f"{day.date()} {contract}: position past non-delivery deadline")
+        exiting = sum(non_delivery and deadlines[c][1] - i + 1 <= LIQUIDATION_DAYS for c in positions)
         for contract, (lots, basis, multiplier, symbol) in list(positions.items()):
             quote = quotes.get(contract)
             if quote and quote.open > 0:
@@ -92,6 +119,11 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
             for symbol, value in row[row.ne(0)].items():
                 contract = contracts.at[day, symbol]
                 quote = quotes.get(contract)
+                if non_delivery and (contract not in deadlines or
+                                     deadlines[contract][1] - i + 1 <= LIQUIDATION_DAYS):
+                    cancelled += 1
+                    deadline_rejections += 1
+                    continue
                 if quote and quote.can_trade and quote.open_cap > 0:
                     signals.append((contract, symbol, value, quote))
                 else:
@@ -103,7 +135,8 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
                 np.array([value for _, _, value, _ in signals]),
                 np.array([quote.open * quote.multiplier for _, _, _, quote in signals]),
                 np.array([quote.long_margin if value > 0 else quote.short_margin for _, _, value, quote in signals]),
-                np.array([quote.limit for _, _, _, quote in signals]),
+                np.array([min(quote.limit, LIQUIDATION_DAYS * min(quote.exit_cap, quote.max_order))
+                          if non_delivery else quote.limit for _, _, _, quote in signals]),
                 equity, margin_cap,
             )
             target = {**keep_pending, **{contract: int(lots) for lots, (contract, _, _, _) in zip(new, signals)}}
@@ -115,14 +148,15 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
             if not quote or not quote.can_trade:
                 cancelled += 1
                 return 0
+            if non_delivery and not (isfinite(quote.limit_up) and quote.limit_up > 0
+                                     and isfinite(quote.limit_down) and quote.limit_down > 0):
+                cancelled += 1
+                return 0
             if quote.limit_blocks(delta):
                 cancelled += 1
                 limit_rejections += 1
                 return 0
-            # A zero client limit forbids carry, so fully liquidate instead of applying the entry-volume cap.
-            capacity = quote.open_cap if opening else (
-                abs(delta) if quote.limit == 0 else quote.exit_cap
-            )
+            capacity = quote.open_cap if opening else quote.exit_cap
             size = min(abs(delta), quote.max_order, capacity)
             if opening:
                 ratio = quote.long_margin if delta > 0 else quote.short_margin
@@ -149,6 +183,8 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
                           "action": "open" if opening else "close", "fill": quote.open, "fee": fee,
                           "effective_price": effective, "slippage": slip, "notional": amount,
                           "fee_fallback": quote.fee_fallback,
+                          "fee_source_date": quote.fee_source_date, "fee_carried": quote.fee_carried,
+                          "fee_source_contract": quote.fee_source_contract, "fee_cross_contract": quote.fee_cross_contract,
                           "missing_limit": not (quote.limit_up > 0 and quote.limit_down > 0)})
             return signed
 
@@ -164,16 +200,7 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
             desired = target.get(contract, 0)
             keep = (1 if lots > 0 else -1) * min(abs(lots), abs(desired)) if lots * desired > 0 else 0
             if keep != lots:
-                quote = quotes.get(contract)
-                if quote and quote.limit == 0:
-                    remaining = lots
-                    while remaining != keep:
-                        filled = order(contract, symbol, keep - remaining, False)
-                        if filled == 0:
-                            break
-                        remaining += filled
-                else:
-                    remaining = lots + order(contract, symbol, keep - lots, False)
+                remaining = lots + order(contract, symbol, keep - lots, False)
                 if remaining:
                     positions[contract] = (remaining, basis, multiplier, symbol)
                 else:
@@ -193,6 +220,11 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
 
         for contract, (lots, basis, multiplier, symbol) in list(positions.items()):
             quote = quotes.get(contract)
+            if non_delivery and deadlines[contract][1] <= i:
+                reason = ("missing quote" if not quote else "missing fee/specification" if not quote.can_trade
+                          else "missing price limits" if not (quote.limit_up > 0 and quote.limit_down > 0)
+                          else "price limit" if quote.limit_blocks(-lots) else "execution capacity")
+                raise ExecutionFailure(f"{day.date()} {contract}: {lots} lots remain at non-delivery deadline ({reason})")
             if quote and quote.settle > 0:
                 pnl = lots * multiplier * (quote.settle - basis)
                 day_pnl += pnl
@@ -200,9 +232,7 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
                 positions[contract] = (lots, quote.settle, multiplier, symbol)
             else:
                 stale += 1
-                # 合约已无后续行情时按最近结算价结束；中间缺一天则保留持仓。
-                if last_quote.get(contract, day) <= day:
-                    del positions[contract]
+                # 缺报价时保留最近标价及未平持仓；不能凭未来行情是否存在虚构平仓。
         notional = sum(lots * basis * mult for lots, basis, mult, _ in positions.values())
         gross = sum(abs(lots) * basis * mult for lots, basis, mult, _ in positions.values())
         margin = margin_used()
@@ -214,6 +244,7 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
             "open_contracts": len(positions), "open_lots": sum(abs(value[0]) for value in positions.values()),
             "unfilled_orders": cancelled, "zero_rounded_targets": zero_rounded,
             "limit_rejections": limit_rejections, "blocked_rolls": blocked_rolls, "stale_marks": stale,
+            "deadline_rejections": deadline_rejections, "exit_window_contracts": exiting,
         })
     return pd.DataFrame(ledger).set_index("date"), pd.DataFrame(fills)
 
@@ -262,6 +293,10 @@ def _book_summary(book: str, ticks: int, daily: pd.DataFrame) -> dict:
         "margin_max": float(daily["margin_fraction"].max()),
         "stale_marks": int(daily["stale_marks"].sum()),
         "terminal_contracts": int(daily["open_contracts"].iloc[-1]),
+        "terminal_open_lots": int(daily["open_lots"].iloc[-1]) if "open_lots" in daily else np.nan,
+        "terminal_gross_notional": float(daily["gross_notional"].iloc[-1]),
+        "exit_window_contract_days": int(daily["exit_window_contracts"].sum()) if "exit_window_contracts" in daily else 0,
+        "deadline_entry_rejections": int(daily["deadline_rejections"].sum()) if "deadline_rejections" in daily else 0,
     }
 
 
@@ -557,17 +592,14 @@ def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str
 
 # ---------------------------------------------------------------- 命令行入口
 
-# 两类策略：只用会员持仓（member），会员持仓加价格因子（member_price）。输出目录按类别对称：
+# 当前仅运行只用会员持仓的 Sticky-only。输出目录：
 #   runs/strategies/<类别>/<策略>/{research,oos,combined}/
 #   runs/strategies/<类别>/comparison/{research,oos,2016-2025}/
-# 除 STICKY_CORE_H20 为 20 日外，所有策略 10 日重叠持有。
-FAMILIES = {
-    "member": (sticky_only, sticky_chain),
-    "member_price": (sticky_core, sticky_core_h20),
-}
+# Sticky-only 采用 10 日重叠持有。
+FAMILIES = {"member": (sticky_only, sticky_chain), "member_price": (sticky_core, sticky_core_h20)}
 FAMILY_TITLES = {
     "member": "会员持仓因子 · 商品期货截面策略",
-    "member_price": "会员持仓因子 · 价格因子 · 商品期货截面策略",
+    "member_price": "会员持仓与价格因子 · 商品期货截面策略",
 }
 MODULES = {module.STRATEGY_ID: module for books in FAMILIES.values() for module in books}
 FAMILY_OF = {module.STRATEGY_ID: family for family, books in FAMILIES.items() for module in books}
@@ -663,7 +695,7 @@ def _run_partition(module, partition: str, base_out: Path, jobs: int) -> None:
         fees = pd.read_csv(fee_path, parse_dates=["trading_date"])
         check_dates(fees["trading_date"], "历史手续费")
 
-    bars = D.load_contracts_span("oos" if partition == "combined" else partition)
+    bars = D.load_contracts_span("oos" if partition == "combined" else partition, for_execution=True)
     benchmark = module is None
     if benchmark:
         book, curve_file = BENCHMARK_BOOK, "equity_curves.csv"
@@ -814,7 +846,7 @@ def _write_all_comparison(families: list[dict[str, pd.DataFrame]]) -> None:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m backtest.engine")
     parser.add_argument("strategy", nargs="?", choices=list(MODULES), help="省略时运行所选类别的全部策略")
-    parser.add_argument("--family", choices=list(FAMILIES), help="策略类别；省略时两类都运行")
+    parser.add_argument("--family", choices=list(FAMILIES), help="策略类别；当前仅 member")
     period = parser.add_mutually_exclusive_group()
     period.add_argument("--research", dest="partition", action="store_const", const="research")
     period.add_argument("--oos", dest="partition", action="store_const", const="oos")

@@ -26,3 +26,15 @@ XS_POSITION = {
     "zscore_window": 250,
     "zscore_min_periods": 60,
 }
+
+
+# 2026-11-25 扩展会员研究已确认；完整定义及检验族由统一研究入口冻结。
+MEMBER_REVIEW = {
+    "specification": "member_imputation_v3",
+    "start": "2011-01-04",
+    "end": "2021-12-31",
+    "primary_horizon": 10,
+    "horizons": (1, 5, 10, 20),
+    "min_names": 8,
+    "min_days": 120,
+}

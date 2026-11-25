@@ -7,9 +7,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 
 from src import config as C
-from research.ic.study import _bh
+from research.ic.statistics import bh as _bh
 
 
 def _binomial_upper_tail(successes: int, trials: int) -> float:
@@ -214,3 +215,38 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def rolling_ts_ic(scores: pd.DataFrame, labels: pd.DataFrame, *, horizon: int,
+                  window: int = 120) -> pd.Series:
+    """过去120个已成熟信号日的逐品种 Spearman 均值；图表日期无未实现标签。
+
+    t 标签最后一段结束于 t+h+1 开盘，所以整个标签延后 h+1 日才可进入图中。
+    """
+    x = scores.shift(horizon + 1).to_numpy(dtype=float)
+    y = labels.reindex_like(scores).shift(horizon + 1).to_numpy(dtype=float)
+    out = pd.Series(np.nan, index=scores.index, dtype=float)
+    if len(x) < window:
+        return out
+    x = np.lib.stride_tricks.sliding_window_view(x, window, axis=0)
+    y = np.lib.stride_tricks.sliding_window_view(y, window, axis=0)
+    paired = np.isfinite(x) & np.isfinite(y)
+    rx = rankdata(np.where(paired, x, np.nan), axis=-1, nan_policy='omit')
+    ry = rankdata(np.where(paired, y, np.nan), axis=-1, nan_policy='omit')
+    n = paired.sum(axis=-1)
+    mean_x = np.divide(np.nansum(rx, axis=-1), n, out=np.zeros(n.shape), where=n > 0)
+    mean_y = np.divide(np.nansum(ry, axis=-1), n, out=np.zeros(n.shape), where=n > 0)
+    rx = np.nan_to_num(rx - mean_x[..., None])
+    ry = np.nan_to_num(ry - mean_y[..., None])
+    denominator = np.sqrt((rx * rx).sum(axis=-1) * (ry * ry).sum(axis=-1))
+    valid = (n >= window) & (denominator > 0)
+    correlations = np.divide((rx * ry).sum(axis=-1), denominator,
+                             out=np.full(n.shape, np.nan), where=valid)
+    count = np.isfinite(correlations).sum(axis=1)
+    out.iloc[window - 1:] = np.divide(np.nansum(correlations, axis=1), count,
+                                     out=np.full(len(count), np.nan), where=count > 0)
+    return out
+
+def matured_xs_ic(ic: pd.Series, horizon: int) -> pd.Series:
+    """将按信号日记录的截面 IC 放到收益标签已实现的交易日。"""
+    return ic.shift(horizon + 1)

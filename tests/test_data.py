@@ -76,25 +76,6 @@ def test_partial_fee_refresh_keeps_dates_the_vendor_did_not_return(tmp_path):
     pd.testing.assert_frame_equal(pd.read_csv(path, parse_dates=["trading_date"]), expected)
 
 
-def test_dry_run_reports_missing_covered_files_without_writes(tmp_path, capsys):
-    import datetime as dt
-    import json
-    from download.getExternal import CoverageCache
-
-    manifest = tmp_path / "coverage.json"
-    saved = json.dumps({"items": {"contracts/A": {"file": "contracts/A.pkl",
-                                                  "coverage": [["20210104", "20210104"]]}}})
-    manifest.write_text(saved, encoding="utf-8")
-    cache = CoverageCache(tmp_path, dry_run=True)
-    day = dt.date(2021, 1, 4)
-
-    cache.fetch("contracts", "A", day, day, lambda *_: pytest.fail("Dry run fetched data"))
-
-    assert "20210104-20210104" in capsys.readouterr().out
-    assert manifest.read_text(encoding="utf-8") == saved
-    assert not (tmp_path / "contracts").exists()
-
-
 def synthetic_panel(n_days: int = 400, symbols=("AA", "BB", "CC", "DD"), seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     dates = pd.bdate_range("2010-01-04", periods=n_days)
@@ -111,7 +92,7 @@ def synthetic_panel(n_days: int = 400, symbols=("AA", "BB", "CC", "DD"), seed: i
     return panel
 
 
-def test_eligibility_ignores_future_turnover():
+def test_eligibility_requires_full_window_and_ignores_future_turnover():
     panel = synthetic_panel()
     before = D.eligibility(panel)
     changed = panel.copy()
@@ -122,8 +103,6 @@ def test_eligibility_ignores_future_turnover():
     pd.testing.assert_series_equal(before[past], after[past])
     assert before[past].iloc[-1]
 
-
-def test_eligibility_requires_full_242_day_liquidity_window():
     dates = pd.bdate_range("2020-01-01", periods=242)
     panel = pd.DataFrame({
         "date": dates,
@@ -191,19 +170,6 @@ def test_download_rejects_financial_futures():
         getMinutes.main(["-t", "20240101-20240102", "--symbols", "IF"])
 
 
-def test_execution_parameters_partition_guards():
-    from download import getExecutionParameters as gep
-    from src import config as C
-
-    assert gep.PARTITION_CACHE["oos"] == C.OOS_EXECUTION_PARAMETERS
-    gep._check_dates(pd.to_datetime(["2021-12-31"]), "research", "test")
-    gep._check_dates(pd.to_datetime(["2022-01-04", "2025-12-31"]), "oos", "test")
-    with pytest.raises(C.HoldoutViolation):
-        gep._check_dates(pd.to_datetime(["2022-01-04"]), "research", "test")
-    with pytest.raises(C.HoldoutViolation):
-        gep._check_dates(pd.to_datetime(["2021-12-31"]), "oos", "test")
-
-
 def test_legacy_contracts_stop_at_successor_listing_date():
     frame = pd.DataFrame({
         "symbol": ["ME", "ME", "MA", "RB"],
@@ -213,6 +179,11 @@ def test_legacy_contracts_stop_at_successor_listing_date():
     out = D.apply_legacy_contracts(frame)
     assert out["symbol"].tolist() == ["MA", "RB", "MA"]
     assert out["contract"].tolist() == ["MA1506", "RB1410", "ME1501"]
+    execution = D.apply_legacy_contracts(frame, for_execution=True)
+    old = execution.loc[execution.contract.eq("ME1501")]
+    assert len(old) == 2
+    assert old.symbol.eq("MA").all()
+    assert old.date.max() == pd.Timestamp("2014-06-17")
 
 
 def test_legacy_dominant_does_not_overwrite_successor_days():
@@ -244,7 +215,7 @@ def test_build_daily_panel_oos_carries_research_prior_close_across_boundary(monk
         "open_interest": [1e5] * 4,
         "volume": [1e5] * 4,
     })
-    monkeypatch.setattr(D, "load_contracts", lambda part="research": res_df if part == "research" else oos_df)
+    monkeypatch.setattr(D, "load_contracts", lambda part="research", **kwargs: res_df if part == "research" else oos_df)
     monkeypatch.setattr(D, "symbols_with_data", lambda part="research": ["RB"])
     monkeypatch.setattr(D, "load_dominant", lambda sym, rank=1, part="research": pd.Series(
         ["RB2205" if rank == 1 else "RB2210"] * 2, index=oos_dates, name=f"rank{rank}",

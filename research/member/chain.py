@@ -12,15 +12,10 @@ from joblib import Parallel, delayed
 
 from src import config as C
 from src import data as D
-from research.factors.member import member_tables, seat_turnover_groups
-from research.ic.study import _rank_corr, forward_returns, return_matrix
-from research.ic.robustness import MIN_NAMES, START, hac_t
-
-
-def masked_net_share(net: pd.DataFrame, gross: pd.DataFrame, mask: pd.DataFrame) -> pd.Series:
-    num = net.where(mask).sum(axis=1, min_count=1)
-    den = gross.where(mask).sum(axis=1, min_count=1)
-    return num / den.where(den.gt(0))
+from research.factors.member import member_tables, net_gross_share as masked_net_share, seat_turnover_groups
+from research.ic.labels import forward_returns, return_matrix
+from research.ic.robustness import MIN_NAMES, START
+from research.ic.statistics import hac_t, rank_corr as _rank_corr, rank_residual
 
 
 def chain_consistent_share(net: dict[str, pd.DataFrame], gross: dict[str, pd.DataFrame],
@@ -51,13 +46,7 @@ def chain_consistent_share(net: dict[str, pd.DataFrame], gross: dict[str, pd.Dat
 
 def residual_scores(score: pd.DataFrame, control: pd.DataFrame) -> pd.DataFrame:
     """同一批品种上，因子截面秩对控制变量截面秩回归后的残差。"""
-    common = score.notna() & control.notna()
-    x = score.where(common).rank(axis=1, pct=True)
-    z = control.where(common).rank(axis=1, pct=True)
-    x = x.sub(x.mean(axis=1), axis=0)
-    z = z.sub(z.mean(axis=1), axis=0)
-    beta = (x * z).sum(axis=1) / z.pow(2).sum(axis=1).where(lambda value: value.gt(0))
-    return x.sub(z.mul(beta, axis=0)).where(common.sum(axis=1).ge(MIN_NAMES), axis=0)
+    return rank_residual(score, control, MIN_NAMES, pct=True)
 
 
 # ---------------------------------------------------------------- 分区输入
@@ -69,17 +58,17 @@ def _symbol_state(symbol: str, dates: pd.DatetimeIndex, market: pd.DataFrame, pa
     return net, gross, sticky
 
 
-def load_chain_inputs(panel: pd.DataFrame, jobs: int, *, partition: str = "research"
+def load_chain_inputs(panel: pd.DataFrame, jobs: int, *, partition: str = "research", start: pd.Timestamp | None = None
                       ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """从同一份席位持仓计算普通粘性净多和一致性净多，并返回主力合约映射。"""
     if partition == "research":
-        start = START
+        start = START if start is None else pd.Timestamp(start)
         C.assert_no_holdout_dates(panel["date"], "跨品种一致性日面板")
     elif partition == "oos":
         start = pd.Timestamp(C.OOS_START)
         C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "跨品种一致性样本外日面板")
     elif partition == "combined":
-        start = START
+        start = START if start is None else pd.Timestamp(start)
     else:
         raise ValueError(f"未知分区 {partition}")
     panel = panel.loc[panel["symbol"].isin(C.COMMODITY_SYMBOLS)].sort_values(["date", "symbol"])

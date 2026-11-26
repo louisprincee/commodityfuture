@@ -63,24 +63,99 @@ def test_sticky_net_share_keeps_low_turnover_and_one_sided_seats():
     assert np.isnan(out.loc[days[1], "STICKY_NET_SHARE"])
 
 
-def test_chain_share_keeps_only_same_direction_sticky_seats():
-    from research.member.chain import chain_consistent_share
+def test_top20_peer_threshold_and_sticky_flow_disclosure_rule():
+    from research.factors.member import extension_factors
 
-    day = pd.DatetimeIndex(["2020-01-02"])
-    seats = ["same", "opposite", "only_a"]
-    net = {
-        "A": pd.DataFrame([[6., -4., 2.]], index=day, columns=seats),
-        "B": pd.DataFrame([[2., 5., 0.]], index=day, columns=seats),
+    days = pd.bdate_range("2020-01-02", periods=2)
+    seats = ["a", "b", "c", "d"]
+    frame = lambda row: pd.DataFrame([row, row], index=days, columns=seats)
+    tables = {
+        "L": frame([20., 30., 10., 40.]), "S": frame([10., 10., 30., np.nan]),
+        "V": frame([3., 20., 40., np.nan]),
+        "dL": frame([1., 2., 3., 4.]), "dS": frame([0., 1., 1., np.nan]),
+        "ranked": pd.Series(True, index=days),
     }
-    gross = {
-        "A": pd.DataFrame([[10., 10., 10.]], index=day, columns=seats),
-        "B": pd.DataFrame([[10., 10., 0.]], index=day, columns=seats),
+    tables["dS"].iloc[1, 0] = np.nan
+    market = pd.DataFrame({"oi": 100., "volume": 1000.}, index=days)
+    out = extension_factors(tables, market, pd.Series(0., index=days))
+    # V/(L+S): a .1, b .5, c 1.0, d off the volume list; median .5 marks b, c as high turnover.
+    assert out.loc[days[0], "STICKY_TOP20"] == pytest.approx((10. + 40.) / (30. + 40.))
+    # Market turnover 10 leaves every seat sticky; a's missing dS on day 2 poisons the flow.
+    assert out.loc[days[0], "STICKY_FLOW"] == pytest.approx((10. - 2.) / 100.)
+    assert np.isnan(out.loc[days[1], "STICKY_FLOW"])
+
+
+def test_extension_factors_use_only_information_known_at_the_close():
+    from research.factors.member import extension_factors
+
+    rng = np.random.default_rng(3)
+    days = pd.bdate_range("2015-01-02", periods=320)
+    seats = [f"m{i}" for i in range(8)]
+    draw = lambda: pd.DataFrame(rng.uniform(1, 50, (320, 8)), index=days, columns=seats)
+    tables = {"L": draw(), "S": draw(), "V": draw(), "dL": draw() - 25, "dS": draw() - 25,
+              "ranked": pd.Series(True, index=days)}
+    market = pd.DataFrame({"oi": rng.uniform(400, 600, 320), "volume": rng.uniform(2000, 3000, 320)}, index=days)
+    returns = pd.Series(rng.normal(0, .01, 320), index=days)
+    base = extension_factors(tables, market, returns)
+    cut = 300
+    later = {key: value.copy() for key, value in tables.items()}
+    for key in ("L", "S", "V", "dL", "dS"):
+        later[key].iloc[cut + 1:] = rng.uniform(1, 50, later[key].iloc[cut + 1:].shape)
+    moved_market = market.copy()
+    moved_market.iloc[cut + 1:] *= 3
+    moved_returns = returns.copy()
+    moved_returns.iloc[cut:] = .5
+    shifted = extension_factors(later, moved_market, moved_returns)
+    pd.testing.assert_frame_equal(base.iloc[:cut + 1], shifted.iloc[:cut + 1])
+    assert base[["STICKY_Z250", "STICKY_IDENTITY", "SEAT_SKILL_NET"]].iloc[cut].notna().all()
+    pd.testing.assert_series_equal(base.STICKY_FLOW5, base.STICKY_FLOW.rolling(5, min_periods=5).mean(),
+                                   check_names=False)
+    pd.testing.assert_series_equal(base.STICKY_FLOW10, base.STICKY_FLOW.rolling(10, min_periods=10).mean(),
+                                   check_names=False)
+
+
+def test_persist_identity_requires_both_seat_conditions():
+    from research.factors.member import extension_factors
+
+    days = pd.bdate_range("2015-01-02", periods=200)
+    seats = ["persist_sticky", "persist_active", "flipper_sticky"]
+    flip = np.where(np.arange(200) % 2 == 0, 1., -1.)
+    tables = {
+        "L": pd.DataFrame({"persist_sticky": 30., "persist_active": 20., "flipper_sticky": 10. + 5 * flip}, index=days),
+        "S": pd.DataFrame({"persist_sticky": 10., "persist_active": 5., "flipper_sticky": 10. - 5 * flip}, index=days),
+        "V": pd.DataFrame({"persist_sticky": 1., "persist_active": 500., "flipper_sticky": 1.}, index=days),
+        "dL": pd.DataFrame(0., index=days, columns=seats), "dS": pd.DataFrame(0., index=days, columns=seats),
+        "ranked": pd.Series(True, index=days),
     }
-    sticky = {symbol: holdings.gt(0) for symbol, holdings in gross.items()}
-    oi = pd.DataFrame({"A": [100.], "B": [200.]}, index=day)
-    result = chain_consistent_share(net, gross, sticky, oi, ["A", "B"])
-    assert result["A"].iloc[0] == pytest.approx(0.6)
-    assert result["B"].iloc[0] == pytest.approx(0.2)
+    market = pd.DataFrame({"oi": 1000., "volume": 1000.}, index=days)
+    out = extension_factors(tables, market)
+    # Only persist_sticky is both persistent in direction and sticky over its listed history.
+    assert out.STICKY_PERSIST_IDENTITY.iloc[-1] == pytest.approx(20. / 40.)
+    assert out.SEAT_SKILL_NET.isna().all()
+    # Preserve the evaluated implementation: the direction rolling mean needs
+    # 20 valid listed days, despite the separate 15-of-20 presence threshold.
+    for side in ("L", "S"):
+        tables[side].loc[days[-3], "persist_sticky"] = np.nan
+    assert np.isnan(extension_factors(tables, market).STICKY_PERSIST_IDENTITY.iloc[-1])
+
+
+def test_sticky_composition_counts_unlisted_holdings_inside_the_sticky_group():
+    from research.factors.member import sticky_composition
+
+    days = pd.bdate_range("2015-01-02", periods=2)
+    seats = ["listed_slow", "unlisted", "fast"]
+    tables = {
+        "L": pd.DataFrame({"listed_slow": 30., "unlisted": 10., "fast": 40.}, index=days),
+        "S": pd.DataFrame({"listed_slow": 10., "unlisted": np.nan, "fast": 20.}, index=days),
+        "V": pd.DataFrame({"listed_slow": 1., "unlisted": np.nan, "fast": 500.}, index=days),
+        "dL": pd.DataFrame(0., index=days, columns=seats), "dS": pd.DataFrame(0., index=days, columns=seats),
+        "ranked": pd.Series([True, False], index=days),
+    }
+    market = pd.DataFrame({"oi": 1000., "volume": 1000.}, index=days)
+    out = sticky_composition(tables, market)
+    assert out.UNLISTED_STICKY_SHARE.iloc[0] == pytest.approx(10. / 50.)
+    assert out.STICKY_GROSS_SHARE.iloc[0] == pytest.approx(50. / 110.)
+    assert out.iloc[1].isna().all()
 
 
 def rank_tables():
@@ -302,7 +377,7 @@ def test_fixed_bh_preserves_unavailable_hypotheses():
 
 
 def test_imputation_comparison_uses_same_pairs_within_each_group():
-    from research.member.review import matched_imputations, evaluate_factors
+    from research.member.review import matched_imputations, evaluate_factors, retained_profile_summary
 
     dates = pd.bdate_range('2011-01-04', periods=150)
     rng = np.random.default_rng(18)
@@ -315,6 +390,10 @@ def test_imputation_comparison_uses_same_pairs_within_each_group():
     summary, daily, _ = evaluate_factors(matched, labels, meta)
     full = summary.loc[summary.period.eq('2011-2021')]
     assert full.loc[full.factor.str.endswith('STICKY'),'days'].eq(149).all()
+    profiles = retained_profile_summary({"RUN_LONG": x, "DIR_STABLE": x}, labels)
+    assert profiles[["q_primary", "q_all"]].isna().all().all()
+    assert profiles.inference_role.eq("post_selection_descriptive_only").all()
+    assert profiles.loc[profiles.period.eq("2011-2021"), "days"].eq(150).all()
     assert full.loc[full.factor.str.endswith('SPEC'),'days'].eq(150).all()
     assert daily.loc[daily.factor.str.endswith('STICKY') & daily.date.eq(dates[0]),'ic'].isna().all()
 
@@ -350,3 +429,13 @@ def test_cumulative_ic_chart_is_written(tmp_path):
     out = tmp_path / 'cumulative_ic.png'
     plot_cumulative_ic(pd.concat(rows, ignore_index=True), out)
     assert out.is_file() and out.stat().st_size > 0
+
+
+def test_rank_composite_averages_percentile_ranks_on_common_names():
+    from research.factors.member import rank_composite
+
+    a = pd.DataFrame([[1., 2., 3., 4.]], columns=list("wxyz"))
+    b = pd.DataFrame([[4., 3., np.nan, 1.]], columns=list("wxyz"))
+    combined = rank_composite(a, b)
+    assert np.isnan(combined.loc[0, "y"])
+    assert combined.loc[0, ["w", "x", "z"]].tolist() == pytest.approx([(1 / 3 + 1) / 2, (2 / 3 + 2 / 3) / 2, (1 + 1 / 3) / 2])

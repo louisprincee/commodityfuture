@@ -6,6 +6,44 @@ import pytest
 from backtest import engine as P
 
 
+def test_only_three_active_strategies_are_registered_and_continuous_results_use_date_folder():
+    assert set(P.MODULES) == {"sticky_net", "persist_identity", "sticky_basis_skew"}
+    assert P.COMPARED == ["sticky_net", "persist_identity"]
+    assert P.partition_directory_name("combined") == "2011-2025"
+    assert P.partition_directory_name("research") == "research"
+
+
+def test_each_strategy_writes_its_own_partition_folders(tmp_path, monkeypatch):
+    monkeypatch.setattr(P.C, "RUNS_DIR", tmp_path)
+    assert P.book_dir("sticky_net") == tmp_path / "strategies" / "sticky_net"
+    price = "sticky_basis_skew"
+    assert P.book_dir(price) == tmp_path / "strategies" / price
+    assert P.holding_days(price) == P.HORIZON
+    with monkeypatch.context() as patch:
+        patch.setattr(P.MODULES[price], "HOLDING_DAYS", 20)
+        assert P.holding_days(price) == 20
+        assert P.book_dir(price) == tmp_path / "strategies" / price / "holding_20"
+        assert P.book_dir("sticky_net") == tmp_path / "strategies" / "sticky_net"
+        patch.setattr(P.MODULES[price], "HOLDING_DAYS", 0)
+        with pytest.raises(ValueError, match="正整数"):
+            P.book_dir(price)
+    assert P.comparison_dir() == tmp_path / "strategies" / "comparison"
+
+    dates = pd.bdate_range("2022-01-03", periods=5)
+    equity = pd.DataFrame({"STICKY_NET": np.linspace(1.0, 1.04, 5) * P.CAPITAL_CNY,
+                           P.MODULES[price].MAIN_BOOK: -100.,
+                           P.BENCHMARK_BOOK: np.linspace(1.0, 0.98, 5) * P.CAPITAL_CNY}, index=dates)
+    for name, book in (("sticky_net", "STICKY_NET"), ("benchmark", P.BENCHMARK_BOOK)):
+        folder = P.C.strategy_dir(name) / "oos"
+        folder.mkdir(parents=True)
+        pd.DataFrame({"book": [book], "ticks": [1]}).to_csv(folder / "summary.csv", index=False)
+    out = P.write_comparison("oos", ["sticky_net", price], equity)
+    assert out == tmp_path / "strategies" / "comparison" / "oos"
+    assert pd.read_csv(out / "summary.csv")["book"].tolist() == ["STICKY_NET", P.BENCHMARK_BOOK]
+    assert {"equity_curves.csv", "yearly_returns.csv", "overview.png"} <= {p.name for p in out.iterdir()}
+    assert not (out / "paired_gains.csv").exists()
+
+
 def test_historical_fee_supplement_stays_inside_sourced_interval():
     from src.costs import fill_historical_fees, carry_forward_fees
 
@@ -62,9 +100,11 @@ def test_early_account_starts_flat_and_trades_close_signal_at_next_open():
     assert fills.iloc[0]["fill"] == 102
 
 
-def test_sticky_core_summary_uses_equity_drawdown_and_backtest_sortino():
+def test_summary_uses_equity_drawdown_and_backtest_sortino():
     returns = pd.Series([0.10, -0.05, 0.02], index=pd.bdate_range("2020-01-01", periods=3))
     equity = P.CAPITAL_CNY * (1 + returns).cumprod()
+    frame = equity.to_frame("synthetic")
+    assert P._period_sharpe(frame)["synthetic"] == pytest.approx(P.metrics(returns)["sharpe"])
     daily = pd.DataFrame({
         "return": returns,
         "turnover": 0.0,
@@ -416,29 +456,3 @@ def test_engine_research_window_uses_2010_warmup_and_preserves_legacy(monkeypatc
     _, _, _, legacy_start, _, legacy_part, _ = P._partition_inputs("legacy_research")
     assert legacy_start == P.LEGACY_START == pd.Timestamp("2016-01-04")
     assert legacy_part == "research"
-
-
-def test_buffered_tail_weights_hold_hysteresis_without_lookahead():
-    from strategies.common import buffered_tail_weights
-
-    dates = pd.bdate_range("2020-01-01", periods=3)
-    cols = [f"S{i}" for i in range(10)]
-    scores = pd.DataFrame(
-        [
-            [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
-            # S0 slips to 2nd (top 20%), S9 slips to 9th (bottom 20%): both stay via buffer; S1/S8 enter top/bottom 10%.
-            [9, 10, 8, 7, 6, 5, 4, 3, 1, 2],
-            # S0 drops to 3rd (out of top 20% since ceil(10*0.2)=2) -> exits!
-            [8, 10, 9, 7, 6, 5, 4, 3, 1, 2],
-        ],
-        index=dates, columns=cols, dtype=float,
-    )
-    w = buffered_tail_weights(scores, enter_share=0.10, exit_share=0.20, min_names=8)
-    assert w.loc[dates[0], "S0"] == pytest.approx(0.5)
-    assert w.loc[dates[0], "S9"] == pytest.approx(-0.5)
-    assert w.loc[dates[1], "S0"] == pytest.approx(0.25)
-    assert w.loc[dates[1], "S1"] == pytest.approx(0.25)
-    assert w.loc[dates[1], "S8"] == pytest.approx(-0.25)
-    assert w.loc[dates[1], "S9"] == pytest.approx(-0.25)
-    assert w.loc[dates[2], "S0"] == 0.0
-    assert w.loc[dates[2], "S1"] == pytest.approx(0.5)

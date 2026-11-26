@@ -94,7 +94,7 @@ def _factor_family(name: str) -> str:
     if "FILLED" in name or name.endswith(("_PROXY", "_CONTROL", "_4D")):
         return "sensitivity"
     if name in SEAT_POST_HOC:
-        # 事后提出的席位拆分，不并入研报指标的主检验族，在 xs_robustness 中单独做 BH。
+        # 事后提出的席位拆分单列，不并入研报指标的主检验族。
         return "seat_post_hoc"
     return "paper_signal" if _discrete(name) else "paper_indicator"
 

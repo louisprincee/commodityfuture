@@ -14,7 +14,7 @@ Strategies turn existing signals into position rules.
 
 The backtest owns the account, execution, costs, and performance. The liquidity universe and the daily panel used by all three layers live in `src/`.
 
-Keep all four existing strategies available: sticky_only, sticky_chain, sticky_core, and sticky_core_h20 (explicit user instruction, 2026-11-25). Do not retire or delete them based on research results. Record genuinely retired experiments in the history document. Propose obsolete files and results for deletion, and obtain explicit user approval before deleting them.
+Keep the active strategies available: sticky_net, persist_identity, and sticky_basis_skew. Per explicit user instruction (2026-11-26), persist_identity requires only STICKY_PERSIST_IDENTITY to be finite, without FLOW5 or baseline validity filters; its account book is PERSIST_IDENTITY. The former sticky_core variants are consolidated into sticky_basis_skew (BASIS_MOM_242, NEG_SKEW_242, STICKY_NET_SHARE), with holding days set only by HOLDING_DAYS at the top of its strategy file, default 10; non-default results use a separate holding_<days>/ folder. member_price strategies keep their source and their own results/figures only; leave them out of report tables and comparison charts. The user-authorized research-only 5/10-day flow-smoothing experiment is not an active strategy and must not read OOS. Do not retire or delete strategies based on research results without an explicit user instruction. Record genuinely retired experiments in the history document. Propose obsolete files and results for deletion, and obtain explicit user approval before deleting them.
 
 ## Timing
 
@@ -58,7 +58,7 @@ The reported case is one tick per side. Save the two-tick case in the result fil
 
 The target-weight multiplier is an input before orders. Do not describe it as leverage the account has already achieved.
 
-The current execution specification is a non-delivery trading account. Contractual maturity and delivery dates must come from actual-contract metadata, never the last available price. Cap target inventory at five days of lagged close capacity, reducing existing excess inventory as fills permit; stop adding and start liquidation during the last five sessions before the earliest contractual/delivery-month/account-end deadline. Close orders retain capacity and price-limit constraints. If a position remains at the deadline, raise an execution failure rather than fabricate delivery or keep reporting stale account performance. Keep this execution specification separate from older results, and apply it uniformly to all four strategies and the benchmark.
+The current execution specification is a non-delivery trading account. Contractual maturity and delivery dates must come from actual-contract metadata, never the last available price. Cap target inventory at five days of lagged close capacity, reducing existing excess inventory as fills permit; stop adding and start liquidation during the last five sessions before the earliest contractual/delivery-month/account-end deadline. Close orders retain capacity and price-limit constraints. If a position remains at the deadline, raise an execution failure rather than fabricate delivery or keep reporting stale account performance. Keep this execution specification separate from older results, and apply it uniformly to all active strategies and the benchmark.
 
 ## Data and records
 

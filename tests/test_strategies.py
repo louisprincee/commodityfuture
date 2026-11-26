@@ -3,43 +3,30 @@ import pandas as pd
 import pytest
 
 
-def test_sticky_flow_uses_common_samples_equal_slots_and_two_stage_selection(monkeypatch):
-    from strategies.member import sticky_flow as S
-    from research.ic.statistics import rank_residual
+def test_identity_requires_only_its_own_finite_score(monkeypatch):
+    from strategies.member import persist_identity as K
+    from strategies.common import hold_cohorts, tail_weights
 
-    dates = pd.bdate_range("2011-01-04", periods=3)
+    dates = pd.bdate_range("2011-01-04", periods=2)
     names = [f"A{i:02d}" for i in range(20)]
-    sticky = pd.DataFrame(np.tile(np.arange(20.), (3, 1)), index=dates, columns=names)
-    flow = sticky.copy()
-    flow.iloc[0, -1] = np.nan
-    flow.iloc[1, 11:] = np.nan
-    flow.iloc[2, 7:] = np.nan
-    residual = sticky.copy()
-    residual.iloc[0, [0, 2, 16, 18]] = [-90., -100., 100., 90.]
+    ramp = pd.DataFrame(np.tile(np.arange(20.), (2, 1)), index=dates, columns=names)
+    ramp.iloc[0, 0] = np.inf
+    signals = {"STICKY_PERSIST_IDENTITY": ramp}
     dominant = pd.DataFrame("AA1105", index=dates, columns=names)
-    monkeypatch.setattr(S, "load_sticky_flow_inputs", lambda *args: (sticky, flow, residual, dominant))
-    books = S.build_books(pd.DataFrame(), dates[0], 1)
-    matched = [books[name] for name in (S.STICKY_BOOK, S.FLOW_BOOK, S.COMBINED_BOOK)]
-    for target in matched:
-        assert target.selection.candidates.tolist() == [19, 11, 7]
-        assert target.selection.long_slots.tolist() == [2, 2, 0]
-        assert target.selection.short_slots.tolist() == [2, 2, 0]
-        pd.testing.assert_series_equal(target.selection.sample_hash, matched[0].selection.sample_hash)
-    first = books[S.COMBINED_BOOK].weights.iloc[0]
-    assert first[first.gt(0)].index.tolist() == ["A16", "A18"]
-    assert first[first.lt(0)].index.tolist() == ["A00", "A02"]
-    assert books[S.REFERENCE_BOOK].selection.candidates.eq(20).all()
-    assert books[S.COMBINED_BOOK].weights.iloc[2].abs().sum() > 0  # prior cohorts survive a missing fresh sample
-    x = pd.DataFrame([np.cos(np.arange(20.))], columns=names)
-    z = sticky.iloc[:1].reset_index(drop=True)
-    r = rank_residual(x, z)
-    centered = z.rank(axis=1).sub(z.rank(axis=1).mean(axis=1), axis=0)
-    assert r.sum(axis=1).abs().lt(1e-10).all()
-    assert (r * centered).sum(axis=1).abs().lt(1e-10).all()
-    assert rank_residual(x, z * 0).isna().all().all()
+    def load_inputs(*args, **kwargs):
+        assert kwargs["partition"] == "oos"
+        assert kwargs["names"] == ("STICKY_PERSIST_IDENTITY",)
+        return signals, dominant
+    monkeypatch.setattr(K, "load_extension_inputs", load_inputs)
+    target = K.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "oos", 1)
+    common = np.isfinite(ramp)
+    expected = hold_cohorts(tail_weights(ramp.where(common)))
+    pd.testing.assert_frame_equal(target.weights, expected)
+    assert target.selection.candidates.tolist() == [19, 20]
+    assert target.weights.iloc[0].loc[lambda r: r.gt(0)].index.tolist() == ["A18", "A19"]
 
 
-def test_cohorts_average_opposing_signals_and_expire_at_both_horizons():
+def test_cohorts_average_opposing_signals_and_expire_at_both_horizons(monkeypatch):
     from strategies.common import hold_cohorts
 
     for horizon in (10, 20):
@@ -55,11 +42,28 @@ def test_cohorts_average_opposing_signals_and_expire_at_both_horizons():
         assert held["B"].iloc[:horizon].eq(1 / horizon).all()
         assert held["B"].iloc[horizon] == 0
 
+    from strategies.member_price import sticky_basis_skew as S
+    dates = pd.bdate_range("2020-01-01", periods=22)
+    score = pd.DataFrame(np.tile(np.arange(20.), (22, 1)), index=dates)
+    dominant = pd.DataFrame("AA2005", index=dates, columns=score.columns)
+    monkeypatch.setattr(S, "load_sticky_inputs", lambda *a, **kw: (score, dominant))
+    monkeypatch.setattr(S, "load_price_factors", lambda *a, **kw: (score, score))
+    assert S.HOLDING_DAYS == 10
+    default = S.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "research", 1)
+    monkeypatch.setattr(S, "HOLDING_DAYS", 20)
+    twenty = S.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "research", 1)
+    assert default.weights.abs().sum(axis=1).iloc[9] == pytest.approx(1.)
+    assert twenty.weights.abs().sum(axis=1).iloc[9] == pytest.approx(.5)
+    assert twenty.weights.abs().sum(axis=1).iloc[19] == pytest.approx(1.)
+    monkeypatch.setattr(S, "HOLDING_DAYS", 0)
+    with pytest.raises(ValueError, match="正整数"):
+        S.build_targets(pd.DataFrame(), pd.DataFrame(), dates[0], "research", 1)
+
 
 def test_early_sticky_targets_keep_full_2010_feature_warmup_but_no_prior_cohorts(monkeypatch):
     from research.factors import member as M
     from research.member import complementarity as legacy
-    from strategies.member import sticky_only
+    from strategies.member import sticky_net
     from strategies.common import HORIZON
 
     dates = pd.bdate_range("2010-01-04", "2016-01-07")
@@ -82,7 +86,7 @@ def test_early_sticky_targets_keep_full_2010_feature_warmup_but_no_prior_cohorts
 
     monkeypatch.setattr(M, "member_tables", tables)
     monkeypatch.setattr(legacy, "member_tables", tables)
-    targets = sticky_only.build_targets(panel, pd.DataFrame(), start, "research", 1)
+    targets = sticky_net.build_targets(panel, pd.DataFrame(), start, "research", 1)
     assert targets.weights.index.min() == start
     assert targets.weights.loc[start].abs().sum() == pytest.approx(1 / HORIZON)
     historical, _, _ = legacy.load_seat_inputs(panel, 1, partition="research")

@@ -125,30 +125,18 @@ def sticky_net_share(t: dict[str, pd.DataFrame], mkt: pd.DataFrame) -> pd.DataFr
 def load_sticky_inputs(panel: pd.DataFrame, start: pd.Timestamp, partition: str,
                        jobs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     """共用品种池内的粘性净多与主力映射；完整历史计算后再截取开户日。"""
-    signals, dominant = _load_member_signals(panel, start, partition, jobs, with_flow=False)
+    signals, dominant = _load_member_signals(panel, start, partition, jobs)
     return signals["STICKY_NET_SHARE"], dominant
 
 
-def load_sticky_flow_inputs(panel: pd.DataFrame, start: pd.Timestamp, jobs: int):
-    """研究期粘性、披露净流及流的秩残差；只产出信号，不形成仓位。"""
-    from research.ic.statistics import rank_residual
-
-    signals, dominant = _load_member_signals(panel, start, "research", jobs, with_flow=True)
-    sticky, flow = signals["STICKY_NET_SHARE"], signals["FLOW_CONTROL"]
-    return sticky, flow, rank_residual(flow, sticky), dominant
+def load_extension_inputs(panel: pd.DataFrame, start: pd.Timestamp, jobs: int, partition: str = "research",
+                          names: tuple[str, ...] = ("STICKY_FLOW", "STICKY_IDENTITY"),
+                          ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    """基准粘性与所选扩展因子（见 extension_factors）；仅产出信号，不形成仓位。"""
+    return _load_member_signals(panel, start, partition, jobs, extension=names)
 
 
-def load_persist_inputs(panel: pd.DataFrame, start: pd.Timestamp, jobs: int) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
-    """研究期基准粘性与纯持续粘性席位因子；仅产出信号，不形成仓位。"""
-    signals, dominant = _load_member_signals(
-        panel, start, "research", jobs,
-        extra_factors=("STICKY_PERSIST", "STICKY_PERSIST_PURE"),
-    )
-    return signals, dominant
-
-
-def _load_member_signals(panel, start, partition, jobs, *, with_flow=False,
-                         extra_factors: tuple[str, ...] = ()):
+def _load_member_signals(panel, start, partition, jobs, *, extension: tuple[str, ...] = ()):
     from joblib import Parallel, delayed
 
     start = pd.Timestamp(start)
@@ -166,19 +154,15 @@ def _load_member_signals(panel, start, partition, jobs, *, with_flow=False,
         tables = member_tables(symbol, eligible.index, top20=True, partition=partition)
         market = pd.DataFrame({"volume": volume[symbol], "oi": oi[symbol]}, index=eligible.index)
         result = sticky_net_share(tables, market)[["STICKY_NET_SHARE"]]
-        if with_flow:
-            valid = (tables["ranked"] & np.isfinite(market["oi"]) & market["oi"].gt(0)
-                     & np.isfinite(market["volume"]) & market["volume"].gt(0))
-            result["FLOW_CONTROL"] = daily_position_flow(tables, market["oi"]).where(valid)
-        if extra_factors:
-            redef = redefinition_factors(tables, market)
-            for col in extra_factors:
-                result[col] = redef[col]
+        if extension:
+            ext = extension_factors(tables, market)
+            for col in extension:
+                result[col] = ext[col]
         return result
 
     values = Parallel(n_jobs=jobs, prefer="threads")(
         delayed(one_symbol)(symbol) for symbol in eligible.columns)
-    names = ["STICKY_NET_SHARE", *(["FLOW_CONTROL"] if with_flow else []), *extra_factors]
+    names = ["STICKY_NET_SHARE", *extension]
     signals = {}
     for name in names:
         matrix = pd.DataFrame({symbol: value[name] for symbol, value in zip(eligible.columns, values)},
@@ -506,6 +490,132 @@ REDEFINITION_META: dict[str, dict[str, str | int]] = {
 }
 
 
+EXTENSION_META: dict[str, dict[str, str | int]] = {
+    "STICKY_TOP20": {"family": "extension", "sign": 1,
+                     "description": "Held seats below the daily median V/(L+S) of seats on the volume list (top-20 peer threshold)."},
+    "STICKY_Z250": {"family": "extension", "sign": 1,
+                    "description": "STICKY_NET_SHARE minus its prior 250-day mean over prior std (>=60 obs)."},
+    "STICKY_CHG20": {"family": "extension", "sign": 1,
+                     "description": "STICKY_NET_SHARE minus its value 20 sessions earlier."},
+    "STICKY_FLOW": {"family": "extension", "sign": 1,
+                    "description": "Disclosed (dL - dS) of today's sticky seats / market OI; missing if any sticky disclosure is missing."},
+    "STICKY_IDENTITY": {"family": "extension", "sign": 1,
+                        "description": "Held seats classified sticky on >=80% of their prior-242-day listed days (>=60 days)."},
+    "SEAT_SKILL_NET": {"family": "extension", "sign": 1,
+                       "description": "Held seats whose prior-242-day mean of sign(net[t-2]) * open-to-open return[t-1] is positive (>=60 obs)."},
+}
+CROWDING_META: dict[str, dict[str, str | int]] = {
+    name: {"family": "crowding", "sign": -1, "description": f"{name} visible net/gross; reversal sign."}
+    for name in ("CROWD1", "CROWD2", "CROWD3")
+}
+
+
+FOLLOWUP_META: dict[str, dict[str, str | int]] = {
+    "STICKY_PERSIST_IDENTITY": {"family": "followup", "sign": 1,
+                                "description": "Held seats passing both the STICKY_PERSIST and STICKY_IDENTITY criteria."},
+    "STICKY_FLOW5": {"family": "followup", "sign": 1,
+                     "description": "Five-session mean of STICKY_FLOW with five valid observations."},
+}
+
+
+def rank_composite(*scores: pd.DataFrame) -> pd.DataFrame:
+    """所有输入同时有效的品种内，各因子截面百分位排名的等权平均。"""
+    common = np.logical_and.reduce([np.isfinite(score) for score in scores])
+    ranks = [score.where(common).rank(axis=1, pct=True) for score in scores]
+    return sum(ranks) / len(ranks)
+
+
+def _persist_mask(t: dict[str, pd.DataFrame], net: pd.DataFrame, held: pd.DataFrame) -> pd.DataFrame:
+    """冻结的持续性筛选：方向均值需 20 个有效上榜观测，一致性至少 0.8。
+
+    因此现有实现实际比名义上的“20 日上榜至少 15 日”更严格；保留已评估规则。
+    """
+    presence = (t["L"].notna() | t["S"].notna()) & t["ranked"].to_numpy()[:, None]
+    present_20d = presence.astype(float).rolling(20, min_periods=20).sum()
+    dir_cons_20d = np.sign(net).where(presence).rolling(20, min_periods=20).mean().abs()
+    return held & present_20d.ge(15) & dir_cons_20d.ge(0.8)
+
+
+def _aligned_tables(tables: dict[str, pd.DataFrame], market: pd.DataFrame):
+    index = market.index
+    if not index.is_unique or not index.is_monotonic_increasing:
+        raise ValueError("market dates must be unique and increasing")
+    columns = tables["L"].columns
+    for key in ("S", "V", "dL", "dS"):
+        columns = columns.union(tables[key].columns, sort=False)
+    ranked = tables["ranked"].reindex(index).fillna(False).astype(bool)
+    t = {key: tables[key].reindex(index=index, columns=columns).astype(float)
+         for key in ("L", "S", "V", "dL", "dS")}
+    t = {key: value.where(np.isfinite(value)).where(ranked, axis=0) for key, value in t.items()}
+    t["ranked"] = ranked
+    m = market[["oi", "volume"]].astype(float)
+    m = m.where(np.isfinite(m))
+    valid = ranked & m["oi"].gt(0) & m["volume"].gt(0)
+    return t, m, valid
+
+
+def sticky_composition(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:
+    """粘性组构成诊断：未上成交榜席位在粘性持仓中的占比，以及粘性持仓占全部可见持仓的比例。"""
+    t, m, valid = _aligned_tables(tables, market)
+    _, gross, sticky, _ = seat_turnover_groups(t, m)
+    held = gross.gt(0) & t["ranked"].to_numpy()[:, None]
+    sticky_gross = gross.where(sticky).sum(axis=1, min_count=1)
+    unlisted_gross = gross.where(sticky & t["V"].isna()).sum(axis=1)
+    return pd.DataFrame({
+        "UNLISTED_STICKY_SHARE": unlisted_gross / sticky_gross.where(sticky_gross.gt(0)),
+        "STICKY_GROSS_SHARE": sticky_gross / gross.where(held).sum(axis=1, min_count=1),
+    }, index=m.index).where(valid, axis=0)
+
+
+def extension_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame,
+                      returns: pd.Series | None = None) -> pd.DataFrame:
+    """事前冻结的粘性净多扩展因子。returns[d] 为 d 日开盘到 d+1 日开盘、按 d-1 收盘主力计算的收益；
+    省略时 SEAT_SKILL_NET 为缺失。"""
+    t, m, valid = _aligned_tables(tables, market)
+    index = m.index
+    net, gross, sticky, _ = seat_turnover_groups(t, m)
+    held = gross.gt(0) & t["ranked"].to_numpy()[:, None]
+    base = net_gross_share(net, gross, sticky).where(valid)
+
+    seat_turnover = t["V"] / gross.where(gross.gt(0))
+    listed = held & t["V"].notna()
+    peer_median = seat_turnover.where(listed).median(axis=1)
+    sticky_top20 = held & ~(listed & seat_turnover.ge(peer_median, axis=0))
+
+    prior = base.shift(1).rolling(250, min_periods=60)
+    z = (base - prior.mean()) / prior.std().where(lambda value: value.gt(0))
+
+    long_expected = sticky & t["L"].notna()
+    short_expected = sticky & t["S"].notna()
+    complete = ((~long_expected | t["dL"].notna()) & (~short_expected | t["dS"].notna())).all(axis=1)
+    sticky_change = t["dL"].where(long_expected).sum(axis=1) - t["dS"].where(short_expected).sum(axis=1)
+    flow = (sticky_change / m["oi"].where(m["oi"].gt(0))).where(complete & sticky.any(axis=1))
+
+    held_days = held.astype(float).shift(1).rolling(242, min_periods=120).sum()
+    sticky_days = (sticky & held).astype(float).shift(1).rolling(242, min_periods=120).sum()
+    identity = held & (sticky_days / held_days.where(held_days.ge(60))).ge(0.8)
+
+    ret = pd.Series(np.nan, index=index) if returns is None else returns.reindex(index)
+    hit = np.sign(net.where(held)).shift(1).mul(ret, axis=0)
+    skill = hit.shift(1).rolling(242, min_periods=60).mean()
+    skilled = held & skill.gt(0)
+
+    out = {
+        "STICKY_NET_SHARE": base,
+        "STICKY_TOP20": net_gross_share(net, gross, sticky_top20),
+        "STICKY_Z250": z,
+        "STICKY_CHG20": base - base.shift(20),
+        "STICKY_FLOW": flow,
+        "STICKY_IDENTITY": net_gross_share(net, gross, identity),
+        "SEAT_SKILL_NET": net_gross_share(net, gross, skilled),
+        "STICKY_PERSIST_IDENTITY": net_gross_share(net, gross, identity & _persist_mask(t, net, held)),
+        "STICKY_FLOW5": flow.where(valid).rolling(5, min_periods=5).mean(),
+        "STICKY_FLOW10": flow.where(valid).rolling(10, min_periods=10).mean(),
+    }
+    crowd = crowding({key: t[key] for key in ("L", "S", "V")}, m)[list(CROWDING_META)]
+    return pd.concat([pd.DataFrame(out, index=index), crowd], axis=1).where(valid, axis=0)
+
+
 def redefinition_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:
     """事前冻结的粘性席位重定义因子族（纯行为持续、低换仓强度、去双边对锁）。"""
     index = market.index
@@ -525,14 +635,11 @@ def redefinition_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame) 
 
     net, gross, sticky, _ = seat_turnover_groups(t, m)
     held = gross.gt(0) & ranked.to_numpy()[:, None]
-    presence = (t["L"].notna() | t["S"].notna()) & ranked.to_numpy()[:, None]
     both_sides = t["L"].notna() & t["S"].notna()
     purity = net.abs() / gross.where(gross.gt(0))
     balanced = both_sides & purity.lt(0.30)
 
-    present_20d = presence.astype(float).rolling(20, min_periods=20).sum()
-    dir_cons_20d = np.sign(net).where(presence).rolling(20, min_periods=20).mean().abs()
-    persist_mask = held & present_20d.ge(15) & dir_cons_20d.ge(0.8)
+    persist_mask = _persist_mask(t, net, held)
 
     # 低换仓强度：需该侧在榜持仓披露增减量（任一应披露侧缺失 dL/dS 则当日调仓强度未知）
     long_ok = t["L"].isna() | t["dL"].notna()

@@ -91,7 +91,7 @@
 
 ![四档末位比例插补 IC 与 95% 置信区间](../runs/research/member_review/imputation_comparison.png)
 
-- **已退役与不再扩展研究**：粘性减高换手差值（`STICKY_MINUS_SPEC`）已在 2010–2021 扩展检验后退役（归档于 `research/history/turnover_spread.py`）；公开经纪会员合作关系仅保留现有对照表 [关系表](../runs/research/member_review/public_relationships.csv)，不再扩展。
+- **已退役与不再扩展研究**：粘性减高换手差值（`STICKY_MINUS_SPEC`）已在 2010–2021 扩展检验后退役（详见 [history.md](history.md)）；公开经纪会员合作关系仅保留现有对照表 [关系表](../runs/research/member_review/public_relationships.csv)，不再扩展。
 
 ---
 
@@ -466,11 +466,8 @@ $$
 ## 附录 D · 复现
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python -m research.history.turnover_spread --jobs 4
 # 以下为保留的旧研究与回测命令（本次未执行）
 PYTHONDONTWRITEBYTECODE=1 python -m research.ic.study member-ic --jobs 4
-PYTHONDONTWRITEBYTECODE=1 python -m research.ic.robustness
-PYTHONDONTWRITEBYTECODE=1 python -m research.member.smoothing --jobs 4
 PYTHONDONTWRITEBYTECODE=1 python -m research.member.complementarity --jobs 4
 PYTHONDONTWRITEBYTECODE=1 python -m research.member.chain --jobs 4
 PYTHONDONTWRITEBYTECODE=1 python -m backtest.engine --family member --research

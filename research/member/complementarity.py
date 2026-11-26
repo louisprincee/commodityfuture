@@ -19,13 +19,14 @@ from joblib import Parallel, delayed
 
 from src import config as C
 from src import data as D
-from research.factors.member import member_tables, seat_turnover_groups
+from research.factors.member import daily_position_flow, member_tables, seat_turnover_groups
 from research.ic.study import forward_returns, return_matrix
-from research.ic.robustness import START
 from research.ic.statistics import bh as _bh, hac_t
+from research.settings import XS_POSITION
 
 HOLD = 5
 MIN_NAMES = 20
+START = pd.Timestamp(XS_POSITION["test_start"])
 PRIMARY = ("flow_confirmation", "size_amplification")
 
 
@@ -102,9 +103,17 @@ def load_seat_inputs(panel: pd.DataFrame, jobs: int, *, partition: str, start=No
             states["size"].where(eligible).loc[start:], wide("c1_contract")[names])
 
 
-def run(out: Path, jobs: int) -> pd.DataFrame:
-    from research.member.smoothing import load_daily_flow
+def load_daily_flow(universe: pd.DataFrame, oi: pd.DataFrame) -> pd.DataFrame:
+    """由研究分区榜单直接计算每个交易日的持仓流，不先按流动性池遮掩。"""
+    dates, symbols = universe.index, universe.columns
+    flow = pd.DataFrame(np.nan, index=dates, columns=symbols)
+    for symbol in symbols:
+        tables = member_tables(symbol, dates, partition="research")
+        flow[symbol] = daily_position_flow(tables, oi[symbol].reindex(dates))
+    return flow
 
+
+def run(out: Path, jobs: int) -> pd.DataFrame:
     panel = D.load_panel()
     sticky, size, contracts = load_seat_inputs(panel, jobs, partition="research")
     oi = panel.pivot(index="date", columns="symbol", values="oi_total").reindex_like(contracts)

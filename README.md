@@ -34,11 +34,10 @@ PYTHONDONTWRITEBYTECODE=1 python -m download.getContractSpecifications --start-d
 | `src/costs.py` | 历史手续费（同合约前值优先、其次同品种无冲突前值）、保证金、容量与跌停约束 |
 | `research/factors/member.py` | 研报指标（拥挤度/一致性/蜘蛛网）、粘性净多及会员画像/流因子 |
 | `research/factors/price.py` | 基差动量 `BASIS_MOM_242` 与负向偏度 `NEG_SKEW_242` |
-| `research/ic/` | `study.py`（IC 与收益标签）、`statistics.py`（HAC/BH/残差）、`robustness.py`、`economic.py`、`plot.py` |
-| `research/member/` | `review.py`（2011–2021 扩展会员研究）、`chain.py`、`complementarity.py`、`smoothing.py` |
+| `research/ic/` | `study.py`（IC 与收益标签）、`statistics.py`（HAC/BH/残差） |
+| `research/member/` | `review.py`（2011–2021 扩展会员研究）、`chain.py`、`complementarity.py` |
 | `strategies/` | `sticky_only`、`sticky_chain`、`sticky_core`、`sticky_core_h20`、`sticky_flow` 与共用选样 `common.py` |
 | `backtest/engine.py` | 整数手非交割回测引擎、绩效表与策略对比总入口 |
-| `research/history/turnover_spread.py` | 已退役差值 `STICKY_MINUS_SPEC` 的复现归档 |
 | `docs/research.md`、`docs/history.md` | 唯一活跃研究报告与口径变更/退役记录 |
 | `tests/` | 四个合成数据测试集（`test_data`、`test_research`、`test_strategies`、`test_backtest`） |
 

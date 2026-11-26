@@ -301,29 +301,6 @@ def test_fixed_bh_preserves_unavailable_hypotheses():
     assert pd.isna(out.iloc[1])
 
 
-def test_time_series_and_cross_sectional_curves_only_use_matured_labels():
-    from research.ic.plot import rolling_ts_ic, matured_xs_ic
-
-    dates = pd.bdate_range('2011-01-04', periods=135)
-    x = pd.DataFrame({'A': np.tile([0., 2., 1.], 45)}, index=dates)
-    labels = x.copy()
-    before = rolling_ts_ic(x, labels, horizon=5, window=120)
-    assert before.iloc[:125].isna().all()
-    assert before.iloc[125] == pytest.approx(1.)
-    labels.iloc[130:] *= -100
-    after = rolling_ts_ic(x, labels, horizon=5, window=120)
-    pd.testing.assert_series_equal(before.iloc[:135], after.iloc[:135])
-    # Cross-sectional IC also waits for the return label to mature.
-    dates = pd.bdate_range('2011-01-04', periods=10)
-    x = pd.Series(np.arange(10.) / 10, index=dates)
-    before = matured_xs_ic(x, 5)
-    assert before.iloc[:6].isna().all()
-    assert before.iloc[6] == 0
-    changed = x.copy()
-    changed.iloc[4:] = 100
-    pd.testing.assert_series_equal(before, matured_xs_ic(changed, 5))
-
-
 def test_imputation_comparison_uses_same_pairs_within_each_group():
     from research.member.review import matched_imputations, evaluate_factors
 

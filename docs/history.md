@@ -2,6 +2,10 @@
 
 本文件记录已退役设计及重要口径演进；活跃报告仍以 `docs/research.md` 为准。
 
+## 2026-11-26
+
+- **清理已退役与早期快照脚本（用户批准）**：删除已退役的 `research/history/turnover_spread.py`（并移除空目录 `research/history/`），以及早期 2016–2021 快照复现脚本与静态表（`research/ic/economic.py`、`research/ic/robustness.py`、`research/ic/plot.py`、`research/member/smoothing.py`、`research/member/public_relationships.csv`）；将 `research/member/{chain,complementarity}.py` 的常量与 `load_daily_flow` 依赖内联至活跃模块；保留 `config/historical_fee_rules.csv` 独立存在以避免改写 `data/` 下原始米筐下载费率表。
+
 ## 2026-11-25
 
 - **退役差值因子 `STICKY_MINUS_SPEC`**：原值 1:1 相减在 2010–2021 全样本未带来统计显著改善（10 日配对 IC 相对粘性净多为 `-0.0117`，`p=0.0743`）。相关复现代码归档至 `research/history/turnover_spread.py`，不显著与不利统计保留在 `runs/research/turnover_spread/`。

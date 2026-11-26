@@ -319,6 +319,26 @@ def test_imputation_comparison_uses_same_pairs_within_each_group():
     assert daily.loc[daily.factor.str.endswith('STICKY') & daily.date.eq(dates[0]),'ic'].isna().all()
 
 
+def test_redefinition_factors_separate_persistence_purity_and_adjust():
+    from research.factors.member import redefinition_factors
+
+    dates = pd.bdate_range('2011-01-04', periods=25)
+    tables = {
+        'L': pd.DataFrame({'PERSIST_PURE': 40., 'BALANCED': 50., 'CHURNER': 10.}, index=dates),
+        'S': pd.DataFrame({'PERSIST_PURE': 5., 'BALANCED': 40., 'CHURNER': 10.}, index=dates),
+        'V': pd.DataFrame({'PERSIST_PURE': np.nan, 'BALANCED': np.nan, 'CHURNER': 100.}, index=dates),
+        'dL': pd.DataFrame({'PERSIST_PURE': 1., 'BALANCED': 10., 'CHURNER': 8.}, index=dates),
+        'dS': pd.DataFrame({'PERSIST_PURE': 0., 'BALANCED': 10., 'CHURNER': 8.}, index=dates),
+        'ranked': pd.Series(True, index=dates),
+    }
+    market = pd.DataFrame({'oi': 200., 'volume': 200.}, index=dates)
+    out = redefinition_factors(tables, market).iloc[-1]
+    assert np.isfinite(out['STICKY_PERSIST'])
+    assert out['STICKY_PERSIST_PURE'] == pytest.approx(35. / 45.)
+    assert out['STICKY_UNILATERAL'] == pytest.approx(35. / 45.)
+    assert out['STICKY_LOW_ADJUST'] == pytest.approx(45. / 135.)
+
+
 def test_cumulative_ic_chart_is_written(tmp_path):
     from research.member.review import plot_cumulative_ic
 

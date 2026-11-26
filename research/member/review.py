@@ -12,7 +12,9 @@ import pandas as pd
 from joblib import Parallel, delayed
 from src import config as C
 from src import data as D
-from research.factors.member import FACTOR_META, market_inputs, member_tables, profile_factors
+from research.factors.member import (
+    FACTOR_META, REDEFINITION_META, market_inputs, member_tables, profile_factors, redefinition_factors,
+)
 from research.ic.statistics import fixed_bh, mean_inference, rank_time_series, rank_corr as _rank_corr, rank_residual
 from research.ic.study import forward_returns, return_matrix
 from research.settings import MEMBER_REVIEW as SETTINGS
@@ -92,15 +94,18 @@ def build_inputs(jobs):
     eligible, dominant = D.member_universe(panel, pd.Timestamp(START), 'research')
     def one(symbol):
         t = member_tables(symbol, eligible.index, top20=True, partition='research')
-        return profile_factors(t, market_inputs(panel, symbol).reindex(eligible.index))
+        mkt = market_inputs(panel, symbol).reindex(eligible.index)
+        return profile_factors(t, mkt), redefinition_factors(t, mkt)
     symbols = list(eligible.columns)
     parts = Parallel(n_jobs=jobs, prefer='threads')(delayed(one)(s) for s in symbols)
-    scores = {name: pd.DataFrame({s: part[name] for s, part in zip(symbols, parts)}, index=eligible.index)
+    scores = {name: pd.DataFrame({s: part[0][name] for s, part in zip(symbols, parts)}, index=eligible.index)
               .where(eligible).loc[START:END] for name in FACTOR_META}
+    redefs = {name: pd.DataFrame({s: part[1][name] for s, part in zip(symbols, parts)}, index=eligible.index)
+              .where(eligible).loc[START:END] for name in REDEFINITION_META}
     bars = D.load_contracts('research', for_execution=True)
     returns = return_matrix(dominant, bars.set_index(['contract', 'date'])['open'])
     labels = {h: forward_returns(returns, h).reindex_like(scores['STICKY_NET_SHARE']) for h in HORIZONS}
-    return scores, labels
+    return scores, redefs, labels
 
 
 def paired_comparisons(daily):
@@ -160,33 +165,48 @@ def evaluate_net_return_gains(returns, parts, control, alternatives):
     return result
 
 
+_FONTS = {'font.family': 'sans-serif', 'axes.unicode_minus': False,
+          'font.sans-serif': ['Arial Unicode MS', 'Hiragino Sans GB', 'PingFang SC', 'Microsoft YaHei', 'Heiti SC', 'SimHei', 'DejaVu Sans']}
+_INK, _MUTED, _GRID, _SURFACE = '#1f2d38', '#52636f', '#e6ecf0', '#fcfcfb'
+_CUM_SERIES = (('IMP00_STICKY', '粘性席位净多', '#2a78d6'), ('IMP00_SPEC', '高换手席位净多', '#eb6834'))
+
+
 def plot_comparison(summary, output):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    with plt.rc_context({'font.sans-serif':['PingFang SC','Heiti SC','DejaVu Sans'], 'axes.unicode_minus':False}):
-        fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-        for ax, group, title in zip(axes, ('STICKY','SPEC'), ('粘性席位','高换手席位')):
+    with plt.rc_context({**_FONTS, 'text.color': _INK, 'axes.labelcolor': _MUTED,
+                         'xtick.color': _MUTED, 'ytick.color': _MUTED}):
+        fig, axes = plt.subplots(1, 2, figsize=(12.2, 4.9), facecolor=_SURFACE)
+        for ax, group, title, color in zip(
+            axes, ('STICKY', 'SPEC'), ('粘性席位（低换手组）', '高换手席位（投机活跃组）'), ('#147D89', '#C27D4E')
+        ):
+            ax.set_facecolor(_SURFACE)
             part = summary.loc[summary.period.eq('2011-2021') & summary.horizon.eq(10)].set_index('factor')
             rows = part.loc[[f'IMP{pct}_{group}' for pct in FRACTIONS]]
-            ax.errorbar(rows.mean_ic, np.arange(4), xerr=1.96*rows.hac_se, fmt='o', capsize=4, color='#147D89')
-            ax.set_yticks(np.arange(4), ['0','0.5','0.8','1.0'])
-            ax.set_ylabel('未上榜持仓 / 末位持仓')
-            ax.set_xlabel('10 日截面平均 IC 与 95% HAC 区间')
-            ax.set_title(title)
-            ax.axvline(0, color='#8b98a1', lw=.8)
-            ax.grid(axis='x',alpha=.15)
-            ax.spines[['top','right']].set_visible(False)
-        fig.suptitle('四档截尾插补 · 2011–2021 · 原分组固定、共同有效样本')
-        fig.tight_layout()
-        fig.savefig(output,dpi=180,facecolor='white')
+            y = np.arange(4)
+            ax.axvline(0, color='#9aa8b2', lw=.9, zorder=1)
+            ax.errorbar(rows.mean_ic, y, xerr=1.96 * rows.hac_se, fmt='o', markersize=6.5,
+                        elinewidth=1.8, capsize=4, color=color, ecolor=color, zorder=3)
+            for idx, r in enumerate(rows.itertuples()):
+                ax.annotate(f'{r.mean_ic:+.4f}  (q={r.q_primary:.3f})', (r.mean_ic, idx),
+                            xytext=(0, 10), textcoords='offset points', ha='center', va='bottom',
+                            fontsize=8.6, color=_INK)
+            ax.set_yticks(y, ['0.0（默认）', '0.5', '0.8', '1.0'])
+            ax.set_ylim(-0.6, 3.7)
+            ax.set_ylabel('未上榜一侧填补比例（× 当日末位持仓）', fontsize=9.5)
+            ax.set_xlabel('10 日截面平均 IC 与 95% HAC 置信区间', fontsize=9.5)
+            ax.set_title(title, loc='left', fontsize=11.5, fontweight='bold', color=_INK, pad=10)
+            ax.grid(axis='x', color=_GRID, lw=.7)
+            ax.spines[['top', 'right']].set_visible(False)
+            ax.spines[['left', 'bottom']].set_color('#d7e0e6')
+            ax.tick_params(length=0, labelsize=9.2)
+        fig.text(.022, .945, '未披露一侧末位比例插补敏感性 · 2011–2021', fontsize=14.5, fontweight='bold')
+        fig.text(.022, .898, '原高低换手分组固定、共同有效样本（2,664 交易日）；粘性组四档差异均不显著。',
+                 fontsize=9.5, color=_MUTED)
+        fig.tight_layout(rect=(0, 0, 1, .87), w_pad=3.0)
+        fig.savefig(output, dpi=180, facecolor=_SURFACE)
         plt.close(fig)
-
-
-_FONTS = {'font.family': 'sans-serif', 'axes.unicode_minus': False,
-          'font.sans-serif': ['Microsoft YaHei', 'PingFang SC', 'Heiti SC', 'SimHei', 'DejaVu Sans']}
-_INK, _MUTED, _GRID, _SURFACE = '#0b0b0b', '#52514e', '#e6e4df', '#fcfcfb'
-_CUM_SERIES = (('IMP00_STICKY', '粘性席位净多', '#2a78d6'), ('IMP00_SPEC', '高换手席位净多', '#eb6834'))
 
 
 def plot_cumulative_ic(daily, output, split='2016-01-04'):
@@ -238,6 +258,112 @@ def plot_cumulative_ic(daily, output, split='2016-01-04'):
         plt.close(fig)
 
 
+def evaluate_redefinitions(redefs: dict[str, pd.DataFrame], labels: dict[int, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """检验事前冻结的新粘性席位定义及其相对原基线的配对 IC 增量。"""
+    candidates = [k for k in REDEFINITION_META if k != 'STICKY_NET_SHARE']
+    rows, daily_list, gains = [], [], []
+    baseline = 'STICKY_NET_SHARE'
+    for name in REDEFINITION_META:
+        score = redefs[name]
+        for h, label in labels.items():
+            ic, count = _rank_corr(score, label.reindex_like(score), MIN_NAMES)
+            lags = max(20, 2 * h)
+            for period, (start, end) in PERIODS.items():
+                values, names = ic.loc[start:end], count.loc[start:end]
+                stats = mean_inference(values, lags, MIN_DAYS)
+                rows.append(dict(factor=name, family=REDEFINITION_META[name]['family'], horizon=h,
+                                 period=period, avg_names=names.mean(), hac_lags=lags, **stats))
+                daily_list.append(pd.DataFrame(dict(date=values.index, factor=name, horizon=h,
+                                                    period=period, ic=values.to_numpy())))
+    summary = pd.DataFrame(rows)
+    daily = pd.concat(daily_list, ignore_index=True)
+    primary = summary.factor.isin(candidates) & summary.horizon.eq(10) & summary.period.eq('2011-2021')
+    summary['q_primary'] = fixed_bh(summary.loc[primary, 'p']).reindex(summary.index)
+    full = summary.factor.isin(candidates)
+    summary['q_all'] = fixed_bh(summary.loc[full, 'p']).reindex(summary.index)
+
+    for h in labels:
+        for period in PERIODS:
+            mat = daily.loc[daily.horizon.eq(h) & daily.period.eq(period)].pivot(index='date', columns='factor', values='ic')
+            for name in candidates:
+                stats = mean_inference(mat[name] - mat[baseline], max(20, 2 * h), MIN_DAYS)
+                stats['mean_ic_gain'] = stats.pop('mean_ic')
+                gains.append(dict(factor=name, control=baseline, horizon=h, period=period, **stats))
+    gains_df = pd.DataFrame(gains)
+    p_mask = gains_df.horizon.eq(10) & gains_df.period.eq('2011-2021')
+    gains_df['q_primary'] = fixed_bh(gains_df.loc[p_mask, 'p']).reindex(gains_df.index)
+    gains_df['q_all'] = fixed_bh(gains_df.p)
+    return summary, daily, gains_df
+
+
+def plot_redefinition_ic(daily: pd.DataFrame, summary: pd.DataFrame, output: Path, split: str = '2016-01-04') -> None:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    series = (
+        ('STICKY_NET_SHARE', '原粘性净多（基线）', '#7a8a96'),
+        ('STICKY_PERSIST', '持久同向粘性（20日>=15日）', '#147D89'),
+        ('STICKY_LOW_ADJUST', '低换仓强度粘性（5日调仓<=中位）', '#C27D4E'),
+        ('STICKY_UNILATERAL', '去双边对锁粘性', '#5B8FA8'),
+        ('STICKY_PERSIST_PURE', '持久+去对锁粘性', '#6E9C7B'),
+    )
+    part10 = daily.loc[daily.horizon.eq(10) & daily.period.eq('2011-2021')]
+    cut = pd.Timestamp(split)
+    with plt.rc_context({**_FONTS, 'text.color': _INK, 'axes.labelcolor': _MUTED,
+                         'xtick.color': _MUTED, 'ytick.color': _MUTED}):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.6, 5.4), facecolor=_SURFACE,
+                                       gridspec_kw={'width_ratios': [1.35, 1.0]})
+        ax1.set_facecolor(_SURFACE)
+        ax1.axvspan(part10.date.min(), cut, color='#f1efea', zorder=0, lw=0)
+        ax1.axhline(0, color='#b9b7b0', lw=.8, zorder=1)
+        for factor, label, color in series:
+            ic = part10.loc[part10.factor.eq(factor)].set_index('date')['ic']
+            cum = ic.dropna().cumsum()
+            lw = 1.6 if factor == 'STICKY_NET_SHARE' else 2.0
+            ls = '--' if factor == 'STICKY_NET_SHARE' else '-'
+            ax1.plot(cum.index, cum, color=color, lw=lw, ls=ls, label=label, solid_capstyle='round')
+        ax1.set_title('10 日累计截面 IC · 灰底为 2011–2015', loc='left', fontsize=11.5, fontweight='bold', pad=10)
+        ax1.set_ylabel('累计 IC（逐日均值之和）', fontsize=9.5)
+        ax1.legend(loc='upper left', frameon=False, fontsize=8.8)
+        ax1.grid(axis='y', color=_GRID, lw=.7)
+        ax1.spines[['top', 'right']].set_visible(False)
+        ax1.spines[['left', 'bottom']].set_color('#d7e0e6')
+        ax1.tick_params(length=0, labelsize=9)
+        ax1.xaxis.set_major_locator(mdates.YearLocator(2))
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+
+        ax2.set_facecolor(_SURFACE)
+        sub = summary.loc[summary.horizon.eq(10) & summary.period.isin(['2011-2015', '2016-2021'])]
+        y = np.arange(len(series))
+        h_bar = 0.34
+        for idx, (factor, label, _) in enumerate(series):
+            early = float(sub.loc[(sub.factor == factor) & (sub.period == '2011-2015'), 'mean_ic'].iloc[0])
+            late = float(sub.loc[(sub.factor == factor) & (sub.period == '2016-2021'), 'mean_ic'].iloc[0])
+            ax2.barh(idx + h_bar / 2, early, height=h_bar, color='#8D83B5', label='2011–2015' if idx == 0 else None)
+            ax2.barh(idx - h_bar / 2, late, height=h_bar, color='#147D89', label='2016–2021' if idx == 0 else None)
+            for val, off in ((early, h_bar / 2), (late, -h_bar / 2)):
+                ax2.annotate(f'{val:+.4f}', (val, idx + off), xytext=(4 if val >= 0 else -4, 0),
+                             textcoords='offset points', ha='left' if val >= 0 else 'right', va='center', fontsize=8.4)
+        ax2.axvline(0, color='#9aa8b2', lw=.8)
+        ax2.set_yticks(y, [label for _, label, _ in series])
+        ax2.invert_yaxis()
+        low_x = min(-0.015, float(sub.mean_ic.min()) - 0.018)
+        high_x = max(0.055, float(sub.mean_ic.max()) + 0.022)
+        ax2.set_xlim(low_x, high_x)
+        ax2.set_title('前后半期 10 日平均 IC 对比', loc='left', fontsize=11.5, fontweight='bold', pad=10)
+        ax2.set_xlabel('平均截面 Spearman IC', fontsize=9.5)
+        ax2.legend(loc='lower right', frameon=False, fontsize=9)
+        ax2.grid(axis='x', color=_GRID, lw=.7)
+        ax2.spines[['top', 'right']].set_visible(False)
+        ax2.spines[['left', 'bottom']].set_color('#d7e0e6')
+        ax2.tick_params(length=0, labelsize=9)
+        fig.text(.018, .95, '粘性席位新定义探索 · 2011–2021（不含成交榜截尾的替代口径）', fontsize=14.5, fontweight='bold')
+        fig.tight_layout(rect=(0, 0, 1, .91), w_pad=2.8)
+        fig.savefig(output, dpi=180, facecolor=_SURFACE)
+        plt.close(fig)
+
+
 def run(out, jobs=4):
     C.assert_research_only(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -246,9 +372,10 @@ def run(out, jobs=4):
                     primary='8 full-period h10 XS tests',full='96 XS + all per-symbol TS over 3 periods and 4 horizons',
                     paired_primary='12 full-period h10 paired differences',paired_full='144 paired differences',
                     flow_primary='2 residual IC tests at h10',flow_full='24 residual IC tests',
+                    redefinition_primary='4 new sticky seat definitions at h10 (2011-2021)',
                     exploratory=True, profile_selection='RUN_LONG,DIR_STABLE selected from prior results; retain prior 12-test q')
     (out/'protocol.json').write_text(json.dumps(protocol,ensure_ascii=False,indent=2))
-    scores, labels = build_inputs(jobs)
+    scores, redefs, labels = build_inputs(jobs)
     matched = matched_imputations(scores)
     metadata = {name:FACTOR_META[name] for name in matched}
     summary, daily, ts = evaluate_factors(matched, labels, metadata)
@@ -259,12 +386,19 @@ def run(out, jobs=4):
     daily.loc[daily.period.eq('2011-2021')].to_parquet(out/'daily_ic.parquet',index=False)
     plot_comparison(summary,out/'imputation_comparison.png')
     plot_cumulative_ic(daily,out/'cumulative_ic.png')
+    redef_summary, redef_daily, redef_gains = evaluate_redefinitions(redefs, labels)
+    redef_summary.to_csv(out / 'seat_redefinition_ic.csv', index=False)
+    redef_gains.to_csv(out / 'seat_redefinition_gains.csv', index=False)
+    plot_redefinition_ic(redef_daily, redef_summary, out / 'seat_redefinition_ic.png')
     prior = out / 'legacy_factor_ic.csv'
     if prior.is_file():
         old = pd.read_csv(prior)
         old.loc[old.factor.isin(['RUN_LONG', 'DIR_STABLE'])].to_csv(out / 'retained_profile_evidence.csv', index=False)
     print(summary.loc[summary.period.eq('2011-2021') & summary.horizon.eq(10),
                       ['factor','mean_ic','p','q_primary','q_all','days']].round(6).to_string(index=False))
+    print("\n--- 粘性席位新定义 (2011-2021, 10日) ---")
+    print(redef_summary.loc[redef_summary.period.eq('2011-2021') & redef_summary.horizon.eq(10),
+                            ['factor','mean_ic','p','q_primary','q_all','days']].round(6).to_string(index=False))
     return summary
 
 

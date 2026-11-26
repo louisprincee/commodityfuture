@@ -3,8 +3,7 @@ import pandas as pd
 
 from research.member.chain import load_chain_inputs, residual_scores
 from strategies import Targets
-from strategies.common import confirmed_weights
-from strategies.common import hold_cohorts
+from strategies.common import confirmed_weights, hold_cohorts
 
 TAIL_SHARE = 0.10
 STRATEGY_ID = "sticky_chain"

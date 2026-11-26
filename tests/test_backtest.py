@@ -340,7 +340,7 @@ def test_non_delivery_exit_respects_capacity_and_fails_if_untradeable(blocked):
     else:
         daily, fills = P.simulate(weights, contracts, market, dates[0], capital=100_000,
                                   neutral=False, slippage_ticks=0, name_cap=1.)
-        assert daily.open_lots.max() == 10  # five days of known close capacity
+        assert daily.open_lots.max() == 6  # 3-day target capacity leaves safety buffer inside 5-day exit window
         assert fills.trade_lots.abs().le(2).all()
         assert not fills.loc[fills.date.ge("2016-03-25"), "action"].eq("open").any()
         assert daily.loc["2016-03-31":, "open_contracts"].eq(0).all()
@@ -397,8 +397,8 @@ def test_contract_specifications_do_not_depend_on_commission_history(tmp_path, m
     assert later[days[4]][contract].fee_carried
 
 
-def test_engine_extended_window_uses_2010_warmup_and_routes_to_research(monkeypatch):
-    dates = pd.bdate_range("2010-01-04", "2011-01-10")
+def test_engine_research_window_uses_2010_warmup_and_preserves_legacy(monkeypatch):
+    dates = pd.bdate_range("2010-01-04", "2016-01-10")
     panel = pd.DataFrame({"date": dates, "symbol": "AA", "c1_contract": "AA1105"})
     seen = {}
 
@@ -407,8 +407,38 @@ def test_engine_extended_window_uses_2010_warmup_and_routes_to_research(monkeypa
     monkeypatch.setattr(P.C, "assert_research_only", lambda p: None)
     monkeypatch.setattr(P.pd, "read_csv", lambda *a, **kw: pd.DataFrame({"trading_date": dates[:2]}))
 
-    got_panel, _, _, start, _, data_partition, _ = P._partition_inputs("research_2011_2021")
-    assert start == P.EXTENDED_START
+    got_panel, _, _, start, _, data_partition, _ = P._partition_inputs("research")
+    assert start == P.BACKTEST_START == pd.Timestamp("2011-01-04")
     assert data_partition == "research"
     assert seen["span"] == "research" and seen["kw"] == {"for_execution": True}
     assert got_panel["date"].min() == P.WARMUP_START
+
+    _, _, _, legacy_start, _, legacy_part, _ = P._partition_inputs("legacy_research")
+    assert legacy_start == P.LEGACY_START == pd.Timestamp("2016-01-04")
+    assert legacy_part == "research"
+
+
+def test_buffered_tail_weights_hold_hysteresis_without_lookahead():
+    from strategies.common import buffered_tail_weights
+
+    dates = pd.bdate_range("2020-01-01", periods=3)
+    cols = [f"S{i}" for i in range(10)]
+    scores = pd.DataFrame(
+        [
+            [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+            # S0 slips to 2nd (top 20%), S9 slips to 9th (bottom 20%): both stay via buffer; S1/S8 enter top/bottom 10%.
+            [9, 10, 8, 7, 6, 5, 4, 3, 1, 2],
+            # S0 drops to 3rd (out of top 20% since ceil(10*0.2)=2) -> exits!
+            [8, 10, 9, 7, 6, 5, 4, 3, 1, 2],
+        ],
+        index=dates, columns=cols, dtype=float,
+    )
+    w = buffered_tail_weights(scores, enter_share=0.10, exit_share=0.20, min_names=8)
+    assert w.loc[dates[0], "S0"] == pytest.approx(0.5)
+    assert w.loc[dates[0], "S9"] == pytest.approx(-0.5)
+    assert w.loc[dates[1], "S0"] == pytest.approx(0.25)
+    assert w.loc[dates[1], "S1"] == pytest.approx(0.25)
+    assert w.loc[dates[1], "S8"] == pytest.approx(-0.25)
+    assert w.loc[dates[1], "S9"] == pytest.approx(-0.25)
+    assert w.loc[dates[2], "S0"] == 0.0
+    assert w.loc[dates[2], "S1"] == pytest.approx(0.5)

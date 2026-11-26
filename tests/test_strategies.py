@@ -4,7 +4,7 @@ import pytest
 
 
 def test_sticky_flow_uses_common_samples_equal_slots_and_two_stage_selection(monkeypatch):
-    from strategies import sticky_flow as S
+    from strategies.member import sticky_flow as S
     from research.ic.statistics import rank_residual
 
     dates = pd.bdate_range("2011-01-04", periods=3)
@@ -59,7 +59,7 @@ def test_cohorts_average_opposing_signals_and_expire_at_both_horizons():
 def test_early_sticky_targets_keep_full_2010_feature_warmup_but_no_prior_cohorts(monkeypatch):
     from research.factors import member as M
     from research.member import complementarity as legacy
-    from strategies import sticky_only
+    from strategies.member import sticky_only
     from strategies.common import HORIZON
 
     dates = pd.bdate_range("2010-01-04", "2016-01-07")

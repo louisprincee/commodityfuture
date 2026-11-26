@@ -4,6 +4,8 @@
 
 ## 2026-11-26
 
+- **策略按纯会员与含价格因子分目录隔离**：将纯会员分支（`sticky_only`、`sticky_chain`、`sticky_flow`、`sticky_persist`）移至 `strategies/member/`，将保留的含价格因子分支（`sticky_core`、`sticky_core_h20`）及其复合 helper 隔离至 `strategies/member_price/`，`strategies/common.py` 不再依赖价格或互补旧模块；活跃研究报告 `docs/research.md` 仅体现纯会员研究与回测结果。
+- **统一研究期/样本外与实盘容量缓冲（方案 B）**：回测默认研究期统一为 `2011–2021`（`2010` 年预热），样本外为 `2022–2025`，`--start 2016 --end 2021` 作为旧研究入口保留代码复现能力并清理旧目录产物；执行账本引入 `TARGET_CAPACITY_DAYS = 3` 与 `LIQUIDATION_DAYS = 5` 解耦设计（持仓上限收紧为 3 日平仓容量，保留最后 5 日强平窗口），消除大资金跨十年连续复利在 `ZC2205` 缩量交割前的尾部残仓问题。
 - **更名合约留到各自最后交易日**：甲醇 `ME`、动力煤 `TC`、菜油 `RO`、强麦 `WS`、早籼稻 `ER` 不再在后继代码挂牌日从研究面板删除。挂牌之后旧月份仍进入该品种的成交额、持仓、主力候选和会员榜。成交额按金额相加；当日合约乘数不一致时，持仓和成交量按吨相加，会员榜先乘各自乘数再相加并重新取前 20 名。重叠期主力用前一交易日吨持仓，超过在任主力 1.1 倍才于下一交易日切换。乘数只取米筐合约规格，不手填。
 - **清理已退役与早期快照脚本（用户批准）**：删除已退役的 `research/history/turnover_spread.py`（并移除空目录 `research/history/`），以及早期 2016–2021 快照复现脚本与静态表（`research/ic/economic.py`、`research/ic/robustness.py`、`research/ic/plot.py`、`research/member/smoothing.py`、`research/member/public_relationships.csv`）；将 `research/member/{chain,complementarity}.py` 的常量与 `load_daily_flow` 依赖内联至活跃模块；保留 `config/historical_fee_rules.csv` 独立存在以避免改写 `data/` 下原始米筐下载费率表。
 

@@ -1,12 +1,14 @@
 """商品期货整数手账本、绩效统计和策略命令行入口。
 
     python -m backtest.engine --research
-    python -m backtest.engine --start 2011 --end 2021
     python -m backtest.engine --oos
-    python -m backtest.engine --start 2016 --end 2025
+    python -m backtest.engine --start 2011 --end 2025
+    python -m backtest.engine --start 2016 --end 2021
     python -m backtest.engine --experiment sticky-flow
+    python -m backtest.engine --experiment sticky-persist
 
-默认运行 2016–2021 研究期；2011–2021 使用完整 2010 年预热。四套现有策略均保留：
+统一回测周期为研究期（2011–2021，含完整 2010 年预热）与样本外（2022–2025）；
+保留 2016–2021 历史入口（legacy_research）独立复现。四套现役策略均保留：
 member（Sticky-only、Sticky-chain）与 member_price（Sticky-core、Sticky-core-h20）。
 """
 from __future__ import annotations
@@ -28,8 +30,10 @@ from src import config as C  # noqa: E402
 from src import data as D  # noqa: E402
 from costs import load_market  # noqa: E402
 from research.settings import XS_POSITION  # noqa: E402
-from strategies import Targets, sticky_only, sticky_chain, sticky_core, sticky_core_h20  # noqa: E402
+from strategies import Targets  # noqa: E402
 from strategies.common import HORIZON, NAME_CAP, TARGET_MULTIPLIER  # noqa: E402
+from strategies.member import sticky_only, sticky_chain  # noqa: E402
+from strategies.member_price import sticky_core, sticky_core_h20  # noqa: E402
 
 CAPITAL_CNY = 10_000_000
 BENCHMARK_BOOK = "LONG_ONLY_BMK"
@@ -38,9 +42,11 @@ MARGIN_CAP = 0.50
 FLAT_MARGIN = 0.20
 BENCHMARK_NAME_CAP = 0.10
 SLIPPAGE_TICKS = 1
-BACKTEST_START = pd.Timestamp(XS_POSITION["test_start"])
+LEGACY_START = pd.Timestamp(XS_POSITION["test_start"])
 WARMUP_START = pd.Timestamp("2010-01-04")
-EXTENDED_START = pd.Timestamp("2011-01-04")
+BACKTEST_START = pd.Timestamp("2011-01-04")
+EXTENDED_START = BACKTEST_START
+TARGET_CAPACITY_DAYS = 3
 LIQUIDATION_DAYS = 5
 
 
@@ -137,7 +143,7 @@ def simulate(weights, contracts, market, start, *, capital=CAPITAL_CNY, neutral=
                 np.array([value for _, _, value, _ in signals]),
                 np.array([quote.open * quote.multiplier for _, _, _, quote in signals]),
                 np.array([quote.long_margin if value > 0 else quote.short_margin for _, _, value, quote in signals]),
-                np.array([min(quote.limit, LIQUIDATION_DAYS * min(quote.exit_cap, quote.max_order))
+                np.array([min(quote.limit, TARGET_CAPACITY_DAYS * min(quote.exit_cap, quote.max_order))
                           if non_delivery else quote.limit for _, _, _, quote in signals]),
                 equity, margin_cap,
             )
@@ -352,7 +358,7 @@ def yearly_returns(equity: pd.DataFrame) -> pd.DataFrame:
 
 
 def _plot_performance(nav: pd.DataFrame, out_path: Path, *, title: str) -> Path:
-    """沿用 time_factor_cta 的双面板布局绘制收益和回撤。"""
+    """绘制净值与回撤双面板（无顶右边框、柔和网格与顶部图例）。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
@@ -360,27 +366,40 @@ def _plot_performance(nav: pd.DataFrame, out_path: Path, *, title: str) -> Path:
     from matplotlib.ticker import PercentFormatter
 
     drawdown = nav.div(nav.cummax().clip(lower=1.0)) - 1.0
-    with plt.rc_context(_CHART_FONTS):
+    palette = ("#5B8FA8", "#C28A5A", "#6E9C7B", "#B76569", "#2F4B7C")
+    colors = {column: ("#8D83B5" if column == BENCHMARK_LABEL else palette[i % len(palette)])
+              for i, column in enumerate(nav.columns)}
+    with plt.rc_context(_OVERVIEW_STYLE):
         figure, (return_axis, drawdown_axis) = plt.subplots(
-            2, 1, figsize=(11, 7), sharex=True, height_ratios=(3, 1),
+            2, 1, figsize=(11.8, 7.2), sharex=True, height_ratios=(2.8, 1), facecolor="#fcfcfb",
         )
-        for column in nav:
-            return_axis.plot(nav.index, nav[column] - 1, label=column, lw=1.2)
-            drawdown_axis.plot(drawdown.index, drawdown[column], lw=1.0)
-        drawdown_axis.fill_between(drawdown.index, drawdown.min(axis=1), 0, color="C0", alpha=0.2)
-        return_axis.set_title(title)
-        return_axis.set_ylabel("累计净收益")
-        return_axis.legend(loc="upper left", fontsize=8)
-        drawdown_axis.set_ylabel("回撤")
         for axis in (return_axis, drawdown_axis):
-            axis.grid(alpha=0.3)
+            axis.set_facecolor("#fcfcfb")
+            axis.spines[["top", "right"]].set_visible(False)
+            axis.spines[["left", "bottom"]].set_color("#d7e0e6")
+            axis.tick_params(length=0, pad=6)
+            axis.grid(axis="y", color="#e6ecf0", linewidth=0.7)
+            axis.grid(axis="x", color="#eff3f6", linewidth=0.6)
+        for column in nav:
+            return_axis.plot(nav.index, nav[column] - 1, label=column, color=colors[column],
+                             lw=1.7, solid_capstyle="round")
+            drawdown_axis.plot(drawdown.index, drawdown[column], color=colors[column],
+                               lw=1.2, solid_capstyle="round")
+        drawdown_axis.fill_between(drawdown.index, drawdown.min(axis=1), 0, color="#8fa5b5", alpha=0.18)
+        drawdown_axis.axhline(0, color="#aab8c4", linewidth=0.7)
+        return_axis.set_ylabel("累计净收益", fontsize=10)
+        return_axis.legend(loc="upper left", bbox_to_anchor=(0, 1.09), ncol=min(len(nav.columns), 4),
+                           frameon=False, fontsize=9.2)
+        drawdown_axis.set_ylabel("回撤", fontsize=10)
+        for axis in (return_axis, drawdown_axis):
             axis.yaxis.set_major_formatter(PercentFormatter(1, decimals=0))
         locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
         drawdown_axis.xaxis.set_major_locator(locator)
         drawdown_axis.xaxis.set_major_formatter(mdates.AutoDateFormatter(locator))
-        figure.tight_layout()
+        figure.suptitle(title, x=0.06, y=0.975, ha="left", fontsize=14, fontweight="bold", color="#293e4c")
+        figure.tight_layout(rect=(0, 0, 1, 0.94))
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(out_path, dpi=130)
+        figure.savefig(out_path, dpi=180, facecolor="#fcfcfb")
         plt.close(figure)
     return out_path
 
@@ -417,6 +436,9 @@ def plot_equity_drawdown(
     equity: pd.DataFrame, out_path: Path, *, strategies: list[str], benchmark: str,
     period_label: str = "研究期", title: str = "会员持仓因子 · 商品期货截面策略",
     research_sharpe: pd.Series | None = None, oos_sharpe: pd.Series | None = None,
+    split_date: str | pd.Timestamp = C.OOS_START,
+    left_label: str = "研究期 Sharpe", right_label: str = "样本外 Sharpe",
+    highlight_before: bool = False,
 ) -> Path:
     """绘制对数累计净值、回撤及逐年收益总览。"""
     import matplotlib
@@ -432,7 +454,7 @@ def plot_equity_drawdown(
     palette = ("#5B8FA8", "#C28A5A", "#6E9C7B", "#B76569")
     colors = {book: palette[i % len(palette)] for i, book in enumerate(strategies)}
     colors[benchmark] = "#8D83B5"
-    split = pd.Timestamp(C.OOS_START)
+    split = pd.Timestamp(split_date)
     if research_sharpe is None:
         research_sharpe = _period_sharpe(frame.loc[frame.index < split])
     if oos_sharpe is None:
@@ -469,11 +491,14 @@ def plot_equity_drawdown(
             axis.spines[["left", "bottom"]].set_color("#d7e0e6")
             axis.tick_params(length=0, pad=7)
         for axis in (nav_axis, drawdown_axis):
-            if nav.index.max() >= split:
+            if highlight_before and nav.index.min() < split:
+                axis.axvspan(nav.index.min(), min(nav.index.max(), split),
+                             color=_OOS_BACKGROUND, alpha=0.65, zorder=0)
+            elif not highlight_before and nav.index.max() >= split:
                 axis.axvspan(max(nav.index.min(), split), nav.index.max(),
                              color=_OOS_BACKGROUND, alpha=0.65, zorder=0)
-                if nav.index.min() < split:
-                    axis.axvline(split, color="#d8c8bc", linewidth=0.8, linestyle=(0, (3, 3)))
+            if nav.index.min() < split < nav.index.max():
+                axis.axvline(split, color="#d8c8bc", linewidth=0.8, linestyle=(0, (3, 3)))
             axis.grid(axis="y", color="#e6ecf0", linewidth=0.7)
             axis.grid(axis="x", color="#eff3f6", linewidth=0.6)
 
@@ -503,7 +528,7 @@ def plot_equity_drawdown(
         positions = np.arange(len(years))
         bar_height = 0.72 / len(annual.columns)
         for y, year in zip(positions, years):
-            if year >= split.year:
+            if (year < split.year) if highlight_before else (year >= split.year):
                 year_axis.axhspan(y - 0.5, y + 0.5, color=_OOS_BACKGROUND, alpha=0.65, linewidth=0)
         for i, column in enumerate(annual.columns):
             values = annual[column].to_numpy(dtype=float) * 100
@@ -537,8 +562,8 @@ def plot_equity_drawdown(
         )
         figure.text(0.075, 0.872, "策略与基准", fontsize=10, color="#7b8b96")
         metric_columns = (
-            (0.57, "研究期 Sharpe", research_sharpe, ".3f"),
-            (0.69, "样本外 Sharpe", oos_sharpe, ".3f"),
+            (0.57, left_label, research_sharpe, ".3f"),
+            (0.69, right_label, oos_sharpe, ".3f"),
             (0.81, "年化收益", annualized, ".2%"),
             (0.935, "全区间最大回撤", drawdown.min(), ".2%"),
         )
@@ -595,8 +620,8 @@ def _write_strategy_comparison(equity: pd.DataFrame, partition: str, family: str
 # ---------------------------------------------------------------- 命令行入口
 
 # 保留四套已有策略：
-#   runs/strategies/<类别>/<策略>/{research,research_2011_2021,oos,combined}/
-#   runs/strategies/<类别>/comparison/{research,research_2011_2021,oos,2016-2025}/
+#   runs/strategies/<类别>/<策略>/{research,oos,combined,legacy_research}/
+#   runs/strategies/<类别>/comparison/{research,oos,2011-2025,legacy_research}/
 FAMILIES = {"member": (sticky_only, sticky_chain), "member_price": (sticky_core, sticky_core_h20)}
 FAMILY_TITLES = {
     "member": "会员持仓因子 · 商品期货截面策略",
@@ -604,7 +629,7 @@ FAMILY_TITLES = {
 }
 MODULES = {module.STRATEGY_ID: module for books in FAMILIES.values() for module in books}
 FAMILY_OF = {module.STRATEGY_ID: family for family, books in FAMILIES.items() for module in books}
-PERIOD_LABELS = {"research": "研究期 2016–2021", "research_2011_2021": "扩展研究期 2011–2021", "oos": "样本外 2022–2025"}
+PERIOD_LABELS = {"research": "研究期 2011–2021", "legacy_research": "旧研究期 2016–2021", "oos": "样本外 2022–2025"}
 
 
 def book_dir(name: str) -> Path:
@@ -626,7 +651,7 @@ def _assert_continuous_dates(values, what: str) -> None:
     """完整区间账本必须从研究期交易到样本外，且不越出 2025 年末。"""
     ts = pd.to_datetime(pd.Index(values))
     if len(ts) < 2 or ts.min() < BACKTEST_START or ts.max() > pd.Timestamp(C.DEFAULT_OOS_END):
-        raise ValueError(f"{what} 日期越出 2016–2025")
+        raise ValueError(f"{what} 日期越出 2011–2025")
     split = pd.Timestamp(C.OOS_START)
     if not ((ts < split).any() and (ts >= split).any()):
         raise ValueError(f"{what} 没有同时覆盖研究期和样本外")
@@ -678,6 +703,9 @@ def _span_market(bars: pd.DataFrame, research_fees: pd.DataFrame, oos_fees: pd.D
 def _partition_inputs(partition: str):
     if partition == "combined":
         panel = D.load_evaluation_panel()
+        panel = panel.loc[panel["date"].between(WARMUP_START, pd.Timestamp(C.DEFAULT_OOS_END))]
+        if panel.empty or panel["date"].min() > WARMUP_START:
+            raise ValueError("缺少完整 2010 年预热面板")
         research_fees, oos_fees = _span_fees()
         fees = (research_fees, oos_fees)
         start, root, data_partition = BACKTEST_START, None, "combined"
@@ -692,12 +720,12 @@ def _partition_inputs(partition: str):
         C.assert_research_only(fee_path)
         check_dates = C.assert_no_holdout_dates
         check_dates(panel["date"], "研究期日面板")
-        if partition == "research_2011_2021":
+        if partition == "legacy_research":
+            start = LEGACY_START
+        else:
             panel = panel.loc[panel["date"].between(WARMUP_START, pd.Timestamp(C.RESEARCH_END))]
             if panel.empty or panel["date"].min() > WARMUP_START:
                 raise ValueError("缺少完整 2010 年预热面板")
-            start = EXTENDED_START
-        else:
             start = BACKTEST_START
         root, data_partition = C.RESEARCH_EXECUTION_PARAMETERS, "research"
         fees = pd.read_csv(fee_path, parse_dates=["trading_date"])
@@ -762,7 +790,7 @@ def _run_partition(module, partition: str, base_out: Path, jobs: int) -> None:
                              flat_margin=FLAT_MARGIN, partition=data_partition)
     _save_book_run(book, targets, contracts, market, start, base_out / partition,
                    neutral=not benchmark, hold=hold, curve_file=curve_file,
-                   save_details=(partition == "research_2011_2021"))
+                   save_details=(partition == "research"))
 
 
 def _read_curve(path: Path) -> pd.DataFrame:
@@ -823,7 +851,7 @@ def _evaluate_continuous(selected: list[str], jobs: int) -> pd.DataFrame:
 
 def _run_combined(family: str, selected: list[str], jobs: int) -> dict[str, pd.DataFrame]:
     """研究期和样本外各自开户。完整区间另跑一条连续账本，图上的夏普仍取两个独立分区。"""
-    partitions = {split: _evaluate_partition(selected, split, jobs, reuse=True) for split in C.PARTITIONS}
+    partitions = {split: _evaluate_partition(selected, split, jobs, reuse=False) for split in C.PARTITIONS}
     combined = _evaluate_continuous(selected, jobs)
     for name in selected:
         # 连续账本的 summary.csv（含 2 跳）已由 _run_partition 写出，这里只补画净值图。
@@ -860,6 +888,8 @@ def _write_all_comparison(families: list[dict[str, pd.DataFrame]]) -> None:
             oos = _partition_frame(families, "oos")
             _write_strategy_comparison(equity, phase, None, research_sharpe=_period_sharpe(research),
                                        oos_sharpe=_period_sharpe(oos))
+        else:
+            _write_partition_comparison(phase, list(MODULES), equity)
         stats_nav = equity.drop(columns=BENCHMARK_BOOK)
         for book, nav in stats_nav.items():
             stats = metrics(nav.div(nav.shift(fill_value=CAPITAL_CNY)) - 1)
@@ -868,27 +898,79 @@ def _write_all_comparison(families: list[dict[str, pd.DataFrame]]) -> None:
     pd.DataFrame(rows).to_csv(C.strategy_dir("") / "summary.csv", index=False)
 
 
-def _write_extended_comparison(selected: list[str], equity: pd.DataFrame) -> None:
-    """汇总 2011–2021 全部现役策略的分区结果与对比图。"""
-    out = comparison_dir(None) / "research_2011_2021"
+def _write_partition_comparison(partition: str, selected: list[str], equity: pd.DataFrame) -> None:
+    """汇总同一独立分区下全部现役策略的绩效表与对比图。"""
+    out = comparison_dir(None) / partition
     out.mkdir(parents=True, exist_ok=True)
-    summaries = [pd.read_csv(book_dir(name) / "research_2011_2021" / "summary.csv") for name in selected]
-    bmk_summary = C.strategy_dir("benchmark") / "research_2011_2021" / "summary.csv"
+    summaries = [pd.read_csv(book_dir(name) / partition / "summary.csv") for name in selected]
+    bmk_summary = C.strategy_dir("benchmark") / partition / "summary.csv"
     if bmk_summary.is_file():
         summaries.append(pd.read_csv(bmk_summary))
     pd.concat(summaries, ignore_index=True).to_csv(out / "summary.csv", index=False)
     equity.to_csv(out / "equity_curves.csv", index_label="date")
     yearly_returns(equity).to_csv(out / "yearly_returns.csv", index=False)
-    frame = equity.rename(columns={BENCHMARK_BOOK: BENCHMARK_LABEL}) / CAPITAL_CNY
-    _plot_performance(frame, out / "overview.png", title="四套策略 · 2011–2021 · 统一非交割执行")
+    books = equity.columns.drop(BENCHMARK_BOOK).tolist()
+    if partition == "research":
+        plot_equity_drawdown(
+            equity, out / "overview.png", strategies=books, benchmark=BENCHMARK_BOOK,
+            period_label="研究期 2011–2021（2010 年预热）· 统一非交割执行",
+            title="四套现役策略与等权基准 · 研究期 2011–2021",
+            split_date="2016-01-04", left_label="2011–2015 Sharpe", right_label="2016–2021 Sharpe",
+            highlight_before=True,
+        )
+    else:
+        frame = equity.rename(columns={BENCHMARK_BOOK: BENCHMARK_LABEL}) / CAPITAL_CNY
+        _plot_performance(frame, out / "overview.png", title=f"四套现役策略与等权基准 · {PERIOD_LABELS[partition]}")
+
+
+def _run_research_experiment(
+    panel: pd.DataFrame, bars: pd.DataFrame, fees: pd.DataFrame,
+    start: pd.Timestamp, root: Path, data_partition: str, check_dates,
+    configured: list[tuple[str, Targets, Path, bool, int]],
+    comp_dir: Path, control_book: str, test_books: list[str],
+    plot_title: str, display_names: dict[str, str],
+) -> None:
+    """在同一研究期样本、非交割执行与成本口径下跑多组对比账本并检验配对净收益增量。"""
+    from research.member.review import evaluate_net_return_gains
+
+    calls = {book: target.dominant.shift(1).reindex_like(target.weights) for book, target, _, _, _ in configured}
+    ids = {value for matrix in calls.values() for value in matrix.to_numpy().ravel() if isinstance(value, str)}
+    market = load_market(bars, fees, ids, start, root=root / "contracts",
+                         flat_margin=FLAT_MARGIN, partition=data_partition)
+    summaries, curves, ledgers = [], {}, {}
+    for book, target, out, neutral, hold in configured:
+        check_dates(calls[book].index, "实验策略日期")
+        rows, ledger = _save_book_run(book, target, calls[book], market, start, out,
+                                      neutral=neutral, hold=hold, save_details=False)
+        summaries.extend(rows)
+        curves[book] = ledger["equity"]
+        ledgers[book] = ledger
+    equity = pd.DataFrame(curves)
+    for book, _, out, neutral, _ in configured:
+        if neutral:
+            _plot_book_figures(equity, out, book, plot_title)
+    comp_dir.mkdir(parents=True, exist_ok=True)
+    equity.to_csv(comp_dir / "equity_curves.csv", index_label="date")
+    pd.DataFrame(summaries).to_csv(comp_dir / "summary.csv", index=False)
+    yearly_returns(equity).to_csv(comp_dir / "yearly_returns.csv", index=False)
+    books = [control_book, *test_books]
+    returns = equity[books].pct_change(fill_method=None)
+    returns.iloc[0] = equity[books].iloc[0] / CAPITAL_CNY - 1
+    parts = {b: pd.DataFrame({"gross": ledgers[b].gross_pnl / ledgers[b].equity.shift(1).fillna(CAPITAL_CNY),
+                              "cost": (ledgers[b].fees + ledgers[b].slippage) / ledgers[b].equity.shift(1).fillna(CAPITAL_CNY)})
+             for b in books}
+    evaluate_net_return_gains(returns, parts, control_book, test_books).to_csv(comp_dir / "paired_return_gains.csv", index=False)
+    frame = equity[[b for b in equity.columns if b in display_names or b == BENCHMARK_BOOK]].rename(
+        columns={**display_names, BENCHMARK_BOOK: BENCHMARK_LABEL}
+    ) / CAPITAL_CNY
+    _plot_performance(frame, comp_dir / "overview.png", title=plot_title)
 
 
 def _run_sticky_flow(jobs: int) -> None:
     """固定增量试验：2011–2021 共同样本比较 Sticky-only、Flow-only 与 Sticky + Flow。"""
-    from strategies import sticky_flow as S
-    from research.member.review import evaluate_net_return_gains
+    from strategies.member import sticky_flow as S
 
-    panel, bars, fees, start, root, data_partition, check_dates = _partition_inputs("research_2011_2021")
+    panel, bars, fees, start, root, data_partition, check_dates = _partition_inputs("research")
     targets = S.build_books(panel, start, jobs)
     samples = [targets[b].selection[["date", "sample_hash", "candidates"]]
                for b in (S.STICKY_BOOK, S.FLOW_BOOK, S.COMBINED_BOOK)]
@@ -898,56 +980,54 @@ def _run_sticky_flow(jobs: int) -> None:
                   for book, target in targets.items()]
     configured.append((BENCHMARK_BOOK, _benchmark_targets(panel, start, data_partition),
                        C.strategy_dir("benchmark") / "sticky_flow", False, 1))
-    calls = {book: target.dominant.shift(1).reindex_like(target.weights) for book, target, _, _, _ in configured}
-    ids = {value for matrix in calls.values() for value in matrix.to_numpy().ravel() if isinstance(value, str)}
-    market = load_market(bars, fees, ids, start, root=root / "contracts",
-                         flat_margin=FLAT_MARGIN, partition=data_partition)
-    summaries, curves, ledgers = [], {}, {}
-    for book, target, out, neutral, hold in configured:
-        check_dates(calls[book].index, "Sticky+Flow 策略日期")
-        rows, ledger = _save_book_run(book, target, calls[book], market, start, out,
-                                      neutral=neutral, hold=hold, save_details=False)
-        summaries.extend(rows)
-        curves[book] = ledger["equity"]
-        ledgers[book] = ledger
-    equity = pd.DataFrame(curves)
-    for book, _, out, neutral, _ in configured:
-        if neutral:
-            _plot_book_figures(equity, out, book, "Sticky + Flow · 2011–2021")
-    comp = comparison_dir(None) / "sticky_flow"
-    comp.mkdir(parents=True, exist_ok=True)
-    equity.to_csv(comp / "equity_curves.csv", index_label="date")
-    pd.DataFrame(summaries).to_csv(comp / "summary.csv", index=False)
-    yearly_returns(equity).to_csv(comp / "yearly_returns.csv", index=False)
-    books = [S.STICKY_BOOK, S.FLOW_BOOK, S.COMBINED_BOOK]
-    returns = equity[books].pct_change(fill_method=None)
-    returns.iloc[0] = equity[books].iloc[0] / CAPITAL_CNY - 1
-    parts = {b: pd.DataFrame({"gross": ledgers[b].gross_pnl / ledgers[b].equity.shift(1).fillna(CAPITAL_CNY),
-                              "cost": (ledgers[b].fees + ledgers[b].slippage) / ledgers[b].equity.shift(1).fillna(CAPITAL_CNY)})
-             for b in books}
-    evaluate_net_return_gains(returns, parts, S.STICKY_BOOK, books[1:]).to_csv(comp / "paired_return_gains.csv", index=False)
-    frame = equity.drop(columns=[S.REFERENCE_BOOK], errors="ignore").rename(columns={
-        S.STICKY_BOOK: "Sticky-only（共同样本）", S.FLOW_BOOK: "Flow-only（共同样本）",
-        S.COMBINED_BOOK: "Sticky + Flow（共同样本）", BENCHMARK_BOOK: BENCHMARK_LABEL,
-    }) / CAPITAL_CNY
-    _plot_performance(frame, comp / "overview.png", title="Sticky + Flow 增量试验 · 2011–2021")
+    _run_research_experiment(
+        panel, bars, fees, start, root, data_partition, check_dates, configured,
+        comparison_dir(None) / "sticky_flow", S.STICKY_BOOK, [S.FLOW_BOOK, S.COMBINED_BOOK],
+        "Sticky + Flow 增量试验 · 2011–2021",
+        {S.STICKY_BOOK: "Sticky-only（共同样本）", S.FLOW_BOOK: "Flow-only（共同样本）",
+         S.COMBINED_BOOK: "Sticky + Flow（共同样本）"},
+    )
+
+
+def _run_sticky_persist(jobs: int) -> None:
+    """研究期对照实验：2011–2021 对比纯持续粘性定义（STICKY_PERSIST / PURE）与排名缓冲带。"""
+    from strategies.member import sticky_persist as P
+
+    panel, bars, fees, start, root, data_partition, check_dates = _partition_inputs("research")
+    targets = P.build_books(panel, start, jobs)
+    configured = [(book, target, C.strategy_dir("member") / "sticky_persist" / book.lower(), True, HORIZON)
+                  for book, target in targets.items()]
+    configured.append((BENCHMARK_BOOK, _benchmark_targets(panel, start, data_partition),
+                       C.strategy_dir("benchmark") / "sticky_persist", False, 1))
+    test_books = [P.BASELINE_BUF_BOOK, P.PERSIST_BOOK, P.PERSIST_PURE_BOOK, P.PERSIST_BUF_BOOK]
+    _run_research_experiment(
+        panel, bars, fees, start, root, data_partition, check_dates, configured,
+        comparison_dir(None) / "sticky_persist", P.BASELINE_BOOK, test_books,
+        "粘性重定义与排名缓冲带 · 研究期 2011–2021",
+        {P.BASELINE_BOOK: "原粘性基线 (10%/10d)", P.BASELINE_BUF_BOOK: "原粘性 + 缓冲带 (10%进/20%出)",
+         P.PERSIST_BOOK: "持续粘性 STICKY_PERSIST", P.PERSIST_PURE_BOOK: "纯持续粘性 PURE",
+         P.PERSIST_BUF_BOOK: "持续粘性 + 缓冲带 (10%进/20%出)"},
+    )
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m backtest.engine")
     parser.add_argument("strategy", nargs="?", choices=list(MODULES), help="省略时运行所选类别的全部策略")
     parser.add_argument("--family", choices=list(FAMILIES), help="策略类别；省略时两类都运行")
-    parser.add_argument("--experiment", choices=("sticky-flow",), help="运行固定增量对照试验")
+    parser.add_argument("--experiment", choices=("sticky-flow", "sticky-persist"), help="运行研究期对照试验")
     period = parser.add_mutually_exclusive_group()
     period.add_argument("--research", dest="partition", action="store_const", const="research")
     period.add_argument("--oos", dest="partition", action="store_const", const="oos")
     period.add_argument("--start", type=int, help="回测起始年，搭配 --end")
-    period.add_argument("--partition", choices=("research", "research_2011_2021", "oos", "combined"))
+    period.add_argument("--partition", choices=("research", "legacy_research", "oos", "combined"))
     parser.add_argument("--end", type=int, help="回测结束年，搭配 --start")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args(argv)
     if args.experiment == "sticky-flow":
         _run_sticky_flow(args.jobs)
+        return 0
+    if args.experiment == "sticky-persist":
+        _run_sticky_persist(args.jobs)
         return 0
     if (args.start is None) != (args.end is None):
         parser.error("--start 和 --end 须一起使用")
@@ -955,7 +1035,7 @@ def main(argv: list[str]) -> int:
     if args.start is not None:
         windows = {
             (BACKTEST_START.year, C.RESEARCH_END.year): "research",
-            (EXTENDED_START.year, C.RESEARCH_END.year): "research_2011_2021",
+            (LEGACY_START.year, C.RESEARCH_END.year): "legacy_research",
             (C.OOS_START.year, C.DEFAULT_OOS_END.year): "oos",
             (BACKTEST_START.year, C.DEFAULT_OOS_END.year): "combined",
         }
@@ -971,7 +1051,7 @@ def main(argv: list[str]) -> int:
     else:
         families = [args.family] if args.family else list(FAMILIES)
     combined_families = []
-    extended_frames = []
+    partition_frames = []
     benchmark = None if partition == "combined" else _benchmark_curve(partition, args.jobs, reuse=False)
     for family in families:
         selected = [args.strategy] if args.strategy else [module.STRATEGY_ID for module in FAMILIES[family]]
@@ -979,14 +1059,14 @@ def main(argv: list[str]) -> int:
             combined_families.append(_run_combined(family, selected, args.jobs))
             continue
         equity = _evaluate_partition(selected, partition, args.jobs, reuse=False, benchmark=benchmark)
-        if partition == "research_2011_2021":
-            extended_frames.append(equity.drop(columns=BENCHMARK_BOOK))
+        if partition in ("research", "oos"):
+            partition_frames.append(equity.drop(columns=BENCHMARK_BOOK))
         if len(selected) > 1:
             _write_strategy_comparison(equity, partition, family)
     if len(combined_families) > 1:
         _write_all_comparison(combined_families)
-    if partition == "research_2011_2021" and not args.strategy and not args.family:
-        _write_extended_comparison(list(MODULES), pd.concat([*extended_frames, benchmark], axis=1))
+    if partition in ("research", "oos") and not args.strategy and not args.family:
+        _write_partition_comparison(partition, list(MODULES), pd.concat([*partition_frames, benchmark], axis=1))
     return 0
 
 

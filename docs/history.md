@@ -4,6 +4,7 @@
 
 ## 2026-11-26
 
+- **更名合约留到各自最后交易日**：甲醇 `ME`、动力煤 `TC`、菜油 `RO`、强麦 `WS`、早籼稻 `ER` 不再在后继代码挂牌日从研究面板删除。挂牌之后旧月份仍进入该品种的成交额、持仓、主力候选和会员榜。成交额按金额相加；当日合约乘数不一致时，持仓和成交量按吨相加，会员榜先乘各自乘数再相加并重新取前 20 名。重叠期主力用前一交易日吨持仓，超过在任主力 1.1 倍才于下一交易日切换。乘数只取米筐合约规格，不手填。
 - **清理已退役与早期快照脚本（用户批准）**：删除已退役的 `research/history/turnover_spread.py`（并移除空目录 `research/history/`），以及早期 2016–2021 快照复现脚本与静态表（`research/ic/economic.py`、`research/ic/robustness.py`、`research/ic/plot.py`、`research/member/smoothing.py`、`research/member/public_relationships.csv`）；将 `research/member/{chain,complementarity}.py` 的常量与 `load_daily_flow` 依赖内联至活跃模块；保留 `config/historical_fee_rules.csv` 独立存在以避免改写 `data/` 下原始米筐下载费率表。
 
 ## 2026-11-25

@@ -317,3 +317,16 @@ def test_imputation_comparison_uses_same_pairs_within_each_group():
     assert full.loc[full.factor.str.endswith('STICKY'),'days'].eq(149).all()
     assert full.loc[full.factor.str.endswith('SPEC'),'days'].eq(150).all()
     assert daily.loc[daily.factor.str.endswith('STICKY') & daily.date.eq(dates[0]),'ic'].isna().all()
+
+
+def test_cumulative_ic_chart_is_written(tmp_path):
+    from research.member.review import plot_cumulative_ic
+
+    dates = pd.bdate_range('2014-01-02', periods=600)
+    rng = np.random.default_rng(3)
+    rows = [pd.DataFrame(dict(date=dates, factor=factor, horizon=h, period='2011-2021',
+                              ic=np.where(rng.random(len(dates)) < .05, np.nan, rng.normal(.02, .1, len(dates)))))
+            for factor in ('IMP00_STICKY', 'IMP00_SPEC') for h in (1, 5, 10, 20)]
+    out = tmp_path / 'cumulative_ic.png'
+    plot_cumulative_ic(pd.concat(rows, ignore_index=True), out)
+    assert out.is_file() and out.stat().st_size > 0

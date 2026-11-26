@@ -65,11 +65,20 @@ def contract_spans(partition: str, start=None, end=None) -> pd.DataFrame:
     _check_dates([start, end], partition, "执行参数请求")
     if start > end or start < pd.Timestamp(C.PARTITION_WINDOWS[partition][0]):
         raise ValueError("执行参数请求日期越出分区或起止倒置")
+    bars = D.load_contracts(partition, for_execution=True)
+    available = set(D.symbols_with_data(partition))
     wanted = set()
-    for symbol in D.symbols_with_data(partition):
+    for symbol in available:
         dom = D.load_dominant(symbol, 1, partition)
         wanted.update(dom.loc[(dom.index >= start) & (dom.index <= end)].dropna().unique())
-    bars = D.load_contracts(partition, for_execution=True)[["contract", "date"]]
+    if partition == "research":
+        multipliers = D.load_contract_multipliers(partition)
+        for symbol in D.legacy_successor_symbols():
+            if symbol not in available:
+                continue
+            dominant, _second = D.adjusted_dominant(symbol, partition, multipliers, bars)
+            wanted.update(dominant.loc[(dominant.index >= start) & (dominant.index <= end)].dropna().unique())
+    bars = bars[["contract", "date"]]
     return (
         bars.loc[bars["contract"].isin(wanted) & bars["date"].between(start, end)]
         .groupby("contract")["date"]

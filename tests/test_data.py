@@ -170,20 +170,101 @@ def test_download_rejects_financial_futures():
         getMinutes.main(["-t", "20240101-20240102", "--symbols", "IF"])
 
 
-def test_legacy_contracts_stop_at_successor_listing_date():
+def test_legacy_contracts_remain_until_their_own_last_quote():
     frame = pd.DataFrame({
         "symbol": ["ME", "ME", "MA", "RB"],
         "date": pd.to_datetime(["2014-06-16", "2014-06-17", "2014-06-17", "2014-06-16"]),
         "contract": ["ME1501", "ME1501", "MA1506", "RB1410"],
     })
     out = D.apply_legacy_contracts(frame)
-    assert out["symbol"].tolist() == ["MA", "RB", "MA"]
-    assert out["contract"].tolist() == ["MA1506", "RB1410", "ME1501"]
     execution = D.apply_legacy_contracts(frame, for_execution=True)
-    old = execution.loc[execution.contract.eq("ME1501")]
-    assert len(old) == 2
-    assert old.symbol.eq("MA").all()
-    assert old.date.max() == pd.Timestamp("2014-06-17")
+    for result in (out, execution):
+        old = result.loc[result.contract.eq("ME1501")]
+        assert len(old) == 2
+        assert old.symbol.eq("MA").all()
+        assert set(result.contract) == {"ME1501", "MA1506", "RB1410"}
+
+
+def test_overlap_uses_tons_and_switches_only_after_prior_open_interest_clears_the_hurdle():
+    dates = pd.to_datetime(["2014-06-16", "2014-06-17", "2014-06-18"])
+    bars = pd.DataFrame({
+        "symbol": ["MA"] * 5,
+        "contract": ["ME1505", "ME1505", "MA1506", "ME1505", "MA1506"],
+        "date": [dates[0], dates[1], dates[1], dates[2], dates[2]],
+        "open_interest": [1000.0, 1000.0, 6000.0, 1000.0, 6000.0],
+        "volume": [10.0, 10.0, 10.0, 10.0, 10.0],
+        "total_turnover": [1.0, 1.0, 1.0, 1.0, 1.0],
+    })
+    totals = bars.groupby(["symbol", "date"]).agg(
+        oi_total=("open_interest", "sum"), volume_total=("volume", "sum"),
+        turnover_total=("total_turnover", "sum"))
+    multipliers = pd.Series({"ME1505": 50.0, "MA1506": 10.0})
+    scaled = D.scale_mixed_multiplier_totals(bars, totals, multipliers)
+    assert scaled.loc[("MA", dates[0]), "oi_total"] == 1000
+    assert scaled.loc[("MA", dates[1]), "oi_total"] == 1000 * 50 + 6000 * 10
+    rank1 = pd.Series(["ME1505", "MA1506", "MA1506"], index=dates, name="rank1")
+    rank2 = pd.Series([pd.NA, pd.NA, pd.NA], index=dates)
+    # 6 月 17 日只能看到 16 日的持仓，新合约还没有前一日持仓，主力仍是 ME1505。
+    # 6 月 18 日看到 17 日 MA 的 6 万手 × 10 吨，超过 ME 5 万吨的 1.1 倍，才切换。
+    adjusted, second = D.resolve_overlap_dominant(bars, rank1, rank2, "ME", multipliers)
+    assert adjusted.tolist() == ["ME1505", "ME1505", "MA1506"]
+    assert pd.isna(second.loc[dates[1]])
+    assert second.loc[dates[2]] == "ME1505"
+    below = bars.copy()
+    below.loc[below.contract.eq("MA1506"), "open_interest"] = 1000
+    stayed, _second = D.resolve_overlap_dominant(below, rank1, rank2, "ME", multipliers)
+    assert stayed.loc[dates[2]] == "ME1505"
+
+
+def test_overlap_member_ranks_add_tons_and_keep_twenty_names():
+    cut = pd.Timestamp("2014-06-17")
+    legacy = pd.DataFrame({
+        "trading_date": [cut - pd.Timedelta(days=1), cut],
+        "symbol": ["ME", "ME"],
+        "side": ["long", "long"],
+        "rank": [1, 1],
+        "member_name": ["旧席位", "旧席位"],
+        "volume": [10.0, 10.0],
+        "volume_change": [1.0, 1.0],
+    })
+    current = pd.DataFrame({
+        "trading_date": [cut, cut],
+        "symbol": ["MA", "MA"],
+        "side": ["long", "long"],
+        "rank": [1, 2],
+        "member_name": ["旧席位", "新席位"],
+        "volume": [20.0, 5.0],
+        "volume_change": [np.nan, 2.0],
+    })
+    extra = pd.DataFrame({
+        "trading_date": [cut] * 20,
+        "symbol": ["MA"] * 20,
+        "side": ["short"] * 20,
+        "rank": list(range(1, 21)),
+        "member_name": [f"空{i:02d}" for i in range(20)],
+        "volume": [float(20 - i) for i in range(20)],
+        "volume_change": [0.0] * 20,
+    })
+    current = pd.concat([current, extra], ignore_index=True)
+    legacy_short = pd.DataFrame({
+        "trading_date": [cut],
+        "symbol": ["ME"],
+        "side": ["short"],
+        "rank": [1],
+        "member_name": ["空外"],
+        "volume": [100.0],
+        "volume_change": [0.0],
+    })
+    legacy = pd.concat([legacy, legacy_short], ignore_index=True)
+    out = D.combine_legacy_member_ranks(current, legacy, "MA", cut, 10.0, 50.0)
+    assert out.loc[out.trading_date.lt(cut), "volume"].tolist() == [10]
+    same = out.loc[out.member_name.eq("旧席位") & out.trading_date.eq(cut)].iloc[0]
+    assert same["volume"] == 10 * 50 + 20 * 10
+    assert np.isnan(same["volume_change"])
+    short = out.loc[out.side.eq("short")]
+    assert len(short) == 20
+    assert short.loc[short["member_name"].eq("空外"), "rank"].item() == 1
+    assert "空19" not in set(short["member_name"])
 
 
 def test_legacy_dominant_does_not_overwrite_successor_days():

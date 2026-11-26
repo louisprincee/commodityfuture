@@ -43,12 +43,63 @@ def specification_rows(instrument, days):
                         index=pd.DatetimeIndex(days, name="date"))
 
 
+def write_multipliers(rq, contract_ids, path):
+    """把供应商返回的静态合约乘数写入一张表。缺一条或非正就失败，不补数。"""
+    rows = []
+    identifiers = sorted(set(contract_ids))
+    for offset in range(0, len(identifiers), 100):
+        batch = identifiers[offset:offset + 100]
+        instruments = rq.instruments(batch)
+        if not isinstance(instruments, (list, tuple)):
+            instruments = [instruments]
+        for instrument in instruments:
+            if instrument is None:
+                continue
+            multiplier = float(instrument.contract_multiplier)
+            if not np.isfinite(multiplier) or multiplier <= 0:
+                raise ValueError(f"{instrument.order_book_id} 乘数无效")
+            rows.append({
+                "contract": instrument.order_book_id,
+                "contract_multiplier": multiplier,
+                "source": f"rqdatac.instruments:{instrument.order_book_id}",
+            })
+    table = pd.DataFrame(rows).drop_duplicates("contract")
+    missing = sorted(set(identifiers) - set(table["contract"]))
+    if missing:
+        raise ValueError(f"缺少合约乘数: {missing[:8]}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".csv.tmp")
+    table.sort_values("contract").to_csv(temporary, index=False)
+    os.replace(temporary, path)
+    return len(table)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--partition", choices=list(PARTITION_CACHE), default="research")
     parser.add_argument("--start-date", type=parse_day, default=parse_day("20100104"))
     parser.add_argument("--end-date", type=parse_day, default=parse_day("20211231"))
+    parser.add_argument("--multipliers", action="store_true",
+                        help="只把研究分区里更名品种及其后继合约的静态乘数写入 contract_multipliers.csv")
     args = parser.parse_args()
+    if args.multipliers:
+        if args.partition != "research":
+            raise SystemExit("合约乘数表只写入研究分区")
+        bars = D.load_contracts(args.partition)
+        code = bars["contract"].str.extract(r"^([A-Z]+)", expand=False)
+        prefixes = set(D.LEGACY_UNDERLYING) | set(D.legacy_successor_symbols())
+        identifiers = bars.loc[code.isin(prefixes), "contract"].unique()
+        credentials = rqdata_credentials()
+        if not credentials:
+            raise RuntimeError("missing RiceQuant configuration")
+        import rqdatac as rq
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rq.init(*credentials)
+        path = C.execution_dir(args.partition) / "contract_multipliers.csv"
+        C.assert_research_only(path)
+        count = write_multipliers(rq, identifiers, path)
+        print(f"合约乘数 {count} 条写入 {path}")
+        return 0
     spans = contract_spans(args.partition, args.start_date, args.end_date)
     bars = D.load_contracts(args.partition, for_execution=True)[["contract", "date"]]
     bars = bars.loc[bars.date.between(pd.Timestamp(args.start_date), pd.Timestamp(args.end_date))]

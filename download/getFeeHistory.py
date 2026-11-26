@@ -34,7 +34,26 @@ def one_symbol(rq, symbol: str, start: str, end: str) -> pd.DataFrame | None:
         return None
     multiplier = rq.futures.get_contract_multiplier(symbol, start, end)
     if multiplier is None or multiplier.empty:
-        raise ValueError(f"{symbol} 缺少历史合约乘数")
+        # 已退市品种没有逐日乘数序列。只用这些主力合约自己的规格，乘数不同就按合约填，不跨代码借用。
+        names = dominant.dropna().astype(str).unique().tolist()
+        instruments = rq.instruments(names)
+        if not isinstance(instruments, (list, tuple)):
+            instruments = [instruments]
+        by_contract = {}
+        for instrument in instruments:
+            if instrument is None:
+                continue
+            value = float(instrument.contract_multiplier)
+            if value != value or value <= 0:
+                raise ValueError(f"{instrument.order_book_id} 乘数无效")
+            by_contract[instrument.order_book_id] = value
+        if set(by_contract) != set(names):
+            raise ValueError(f"{symbol} 期货合约乘数返回不完整")
+        multiplier = dominant.astype(str).map(by_contract).rename("contract_multiplier")
+        if multiplier.isna().any():
+            raise ValueError(f"{symbol} 手续费日期缺少合约乘数")
+        multiplier.index = pd.to_datetime(multiplier.index)
+        multiplier.index.name = "date"
     multiplier = multiplier.reset_index()
     multiplier["date"] = pd.to_datetime(multiplier["date"]).dt.normalize()
     multiplier = multiplier.set_index("date")["contract_multiplier"].sort_index()

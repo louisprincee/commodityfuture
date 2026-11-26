@@ -183,6 +183,61 @@ def plot_comparison(summary, output):
         plt.close(fig)
 
 
+_FONTS = {'font.family': 'sans-serif', 'axes.unicode_minus': False,
+          'font.sans-serif': ['Microsoft YaHei', 'PingFang SC', 'Heiti SC', 'SimHei', 'DejaVu Sans']}
+_INK, _MUTED, _GRID, _SURFACE = '#0b0b0b', '#52514e', '#e6e4df', '#fcfcfb'
+_CUM_SERIES = (('IMP00_STICKY', '粘性席位净多', '#2a78d6'), ('IMP00_SPEC', '高换手席位净多', '#eb6834'))
+
+
+def plot_cumulative_ic(daily, output, split='2016-01-04'):
+    """逐日截面 IC 直接加总（不复利、缺失日不填补），按预测期分面；两段均值标在各面板内。"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    part = daily.loc[daily.period.eq('2011-2021')]
+    horizons = sorted(part.horizon.unique())
+    cut = pd.Timestamp(split)
+    with plt.rc_context({**_FONTS, 'text.color': _INK, 'axes.labelcolor': _MUTED,
+                         'xtick.color': _MUTED, 'ytick.color': _MUTED}):
+        fig, axes = plt.subplots(2, 2, figsize=(13, 8.2), sharex=True, facecolor=_SURFACE)
+        for ax, horizon in zip(axes.flat, horizons):
+            ax.set_facecolor(_SURFACE)
+            ax.axvspan(part.date.min(), cut, color='#f1efea', zorder=0, lw=0)
+            ax.axhline(0, color='#b9b7b0', lw=.8, zorder=1)
+            notes = []
+            for factor, label, color in _CUM_SERIES:
+                ic = part.loc[part.factor.eq(factor) & part.horizon.eq(horizon)].set_index('date')['ic']
+                cum = ic.dropna().cumsum()
+                ax.plot(cum.index, cum, color=color, lw=2, solid_capstyle='round', zorder=3)
+                ax.annotate(label, (cum.index[-1], cum.iloc[-1]), xytext=(6, 0), textcoords='offset points',
+                            va='center', fontsize=9, color=_INK)
+                early, late = ic.loc[:cut - pd.Timedelta(days=1)].mean(), ic.loc[cut:].mean()
+                notes.append(f'{label}  前 {early:+.4f} / 后 {late:+.4f}')
+            ax.text(.015, .97, '\n'.join(notes), transform=ax.transAxes, va='top', fontsize=8.6, color=_MUTED,
+                    linespacing=1.6)
+            ax.set_title(f'{horizon} 日标签', loc='left', fontsize=11.5, fontweight='bold', color=_INK, pad=8)
+            ax.grid(axis='y', color=_GRID, lw=.7)
+            ax.spines[['top', 'right']].set_visible(False)
+            ax.spines[['left', 'bottom']].set_color('#d7d5cf')
+            ax.tick_params(length=0, labelsize=9)
+            ax.xaxis.set_major_locator(mdates.YearLocator(2))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+            ax.margins(x=.0)
+            ax.set_xlim(part.date.min(), part.date.max() + pd.Timedelta(days=420))
+        for ax in axes[:, 0]:
+            ax.set_ylabel('累计 IC（逐日截面 IC 之和）', fontsize=9.5)
+        handles = [plt.Line2D([], [], color=color, lw=2) for _, _, color in _CUM_SERIES]
+        fig.legend(handles, [label for _, label, _ in _CUM_SERIES], loc='upper right', ncol=2, frameon=False,
+                   fontsize=10, bbox_to_anchor=(.985, .955))
+        fig.text(.012, .955, '粘性与高换手席位净多的累计截面 IC · 2011–2021', fontsize=15, fontweight='bold')
+        fig.text(.012, .918, '共同有效样本、未上榜一侧记 0；灰底为 2011–2015。上升 = 该段排序方向与后续收益一致，'
+                 '斜率 ≈ 当段平均 IC。纵轴不是收益率。', fontsize=9.5, color=_MUTED)
+        fig.tight_layout(rect=(0, 0, 1, .9), h_pad=2.2, w_pad=2.5)
+        fig.savefig(output, dpi=180, facecolor=_SURFACE)
+        plt.close(fig)
+
+
 def run(out, jobs=4):
     C.assert_research_only(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -203,6 +258,7 @@ def run(out, jobs=4):
     flow_incremental(scores,labels).to_csv(out/'flow_incremental.csv',index=False)
     daily.loc[daily.period.eq('2011-2021')].to_parquet(out/'daily_ic.parquet',index=False)
     plot_comparison(summary,out/'imputation_comparison.png')
+    plot_cumulative_ic(daily,out/'cumulative_ic.png')
     prior = out / 'legacy_factor_ic.csv'
     if prior.is_file():
         old = pd.read_csv(prior)

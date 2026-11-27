@@ -109,28 +109,31 @@ def carry_forward_fees(bars: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-_CONTRACT_TABLES: dict[tuple, pd.DataFrame | None] = {}
-
-
-def _contract_table(path: Path, contract: str, partition: str, check_dates, what: str) -> pd.DataFrame | None:
-    """读取单个合约的执行参数表。同一进程内按路径、修改时间和大小缓存；文件一变即重读。"""
-    try:
-        stat = path.stat()
-        version = (stat.st_mtime_ns, stat.st_size)
-    except FileNotFoundError:
-        version = None
-    key = (str(path), partition, version)
-    if key not in _CONTRACT_TABLES:
-        if partition == "research":
-            C.assert_research_only(path)
-        table = None
-        if path.is_file():
-            raw = pd.read_pickle(path)
+def _load_parameter_folder(folder: Path, names: set[str], partition: str, check_dates, what: str) -> pd.DataFrame | None:
+    """读取执行参数子目录（合并 Parquet 缓存，源 .pkl 变动自动重算）并按合约过滤。"""
+    def _build(entries):
+        parts = []
+        for entry in entries:
+            contract = entry.name[:-4]
+            raw = pd.read_pickle(entry.path)
             check_dates(raw.index, f"{contract} {what}")
             if not raw.empty:
-                table = raw.rename_axis("date").reset_index().assign(contract=contract)
-        _CONTRACT_TABLES[key] = table
-    return _CONTRACT_TABLES[key]
+                table = raw.rename_axis("date").reset_index()
+                table["date"] = pd.to_datetime(table["date"]).astype("datetime64[ns]")
+                table["contract"] = contract
+                parts.append(table)
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+    full = C.cached_directory_parquet(
+        folder, partition, f"exec_{folder.name}",
+        guard_fn=C.assert_research_only if partition == "research" else None,
+        build_fn=_build,
+    )
+    if full is None or full.empty:
+        return None
+    check_dates(full["date"], what)
+    sub = full.loc[full["contract"].isin(names)]
+    return sub if not sub.empty else None
 
 
 def _quote_fields(bars: pd.DataFrame, flat_margin: float | None) -> dict[str, list]:
@@ -178,7 +181,8 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
     if flat_margin is not None and not (0 < flat_margin <= 1):
         raise ValueError("flat_margin 必须在 (0, 1] 内")
     if partition == "research":
-        C.assert_research_only(root)
+        for folder in (root, root.parent / "price_limits", root.parent / "specifications"):
+            C.assert_research_only(folder)
         check_dates = C.assert_no_holdout_dates
     elif partition == "oos":
         check_dates = C.assert_oos_dates
@@ -190,23 +194,14 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
     bars["prior_volume"] = bars.groupby("contract")["volume"].transform(
         lambda volume: volume.shift(1).rolling(20, min_periods=5).median()
     )
-    tables = []
-    price_limits = []
-    specifications = []
-    for contract in sorted(names):
-        for folder, what, out in ((root, "交易参数", tables), (root.parent / "price_limits", "涨跌停价", price_limits),
-                                  (root.parent / "specifications", "合约规格", specifications)):
-            table = _contract_table(folder / f"{contract}.pkl", contract, partition, check_dates, what)
-            if table is not None:
-                out.append(table)
-    if not tables:
+    actual = _load_parameter_folder(root, names, partition, check_dates, "交易参数")
+    if actual is None:
         raise RuntimeError("历史执行参数为空")
-    actual = pd.concat(tables, ignore_index=True)
     bars = bars.merge(actual, on=["contract", "date"], how="left", validate="one_to_one")
-    if not price_limits:
+    limits = _load_parameter_folder(root.parent / "price_limits", names, partition, check_dates, "涨跌停价")
+    if limits is None:
         raise RuntimeError("历史涨跌停价为空")
-    bars = bars.merge(pd.concat(price_limits, ignore_index=True), on=["contract", "date"],
-                      how="left", validate="one_to_one")
+    bars = bars.merge(limits, on=["contract", "date"], how="left", validate="one_to_one")
     fallback = fees.rename(columns={"trading_date": "date"}).copy()
     fallback["date"] = pd.to_datetime(fallback["date"]).astype("datetime64[ns]")
     fallback["fee_source_date"] = fallback["date"]
@@ -225,10 +220,11 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
     bars[specs] = fallback[specs].reindex(bars.index)
     bars["last_trading_date"] = pd.NaT
     bars["start_delivery_date"] = pd.NaT
-    if specifications:
+    specs_df = _load_parameter_folder(root.parent / "specifications", names, partition, check_dates, "合约规格")
+    if specs_df is not None:
         # Contract metadata is independent of commission coverage. Align exact
         # observations only, never backfill a later contract specification.
-        independent = pd.concat(specifications, ignore_index=True).set_index(["contract", "date"])
+        independent = specs_df.set_index(["contract", "date"])
         bars[specs] = independent[specs].reindex(bars.index).combine_first(bars[specs])
         for column in ("last_trading_date", "start_delivery_date"):
             if column in independent:

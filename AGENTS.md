@@ -58,7 +58,7 @@ The reported case is one tick per side. Save the two-tick case in the result fil
 
 The target-weight multiplier is an input before orders. Do not describe it as leverage the account has already achieved.
 
-The current execution specification is a non-delivery trading account. Contractual maturity and delivery dates must come from actual-contract metadata, never the last available price. Cap target inventory at five days of lagged close capacity, reducing existing excess inventory as fills permit; stop adding and start liquidation during the last five sessions before the earliest contractual/delivery-month/account-end deadline. Close orders retain capacity and price-limit constraints. If a position remains at the deadline, raise an execution failure rather than fabricate delivery or keep reporting stale account performance. Keep this execution specification separate from older results, and apply it uniformly to all active strategies and the benchmark.
+The current execution specification is a non-delivery trading account. Contractual maturity and delivery dates must come from actual-contract metadata, never the last available price. Cap target inventory at three days of lagged close capacity, reducing existing excess inventory as fills permit; stop adding and start liquidation during the last five sessions before the earliest contractual/delivery-month/account-end deadline. Close orders retain capacity and price-limit constraints. If a position remains at the deadline, raise an execution failure rather than fabricate delivery or keep reporting stale account performance. Keep this execution specification separate from older results, and apply it uniformly to all active strategies and the benchmark.
 
 ## Data and records
 

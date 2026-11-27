@@ -25,7 +25,7 @@ PARTITION_CACHE = {
     "oos": C.OOS_EXECUTION_PARAMETERS,
 }
 PARTITION_START = {
-    "research": pd.Timestamp("2016-01-04"),
+    "research": pd.Timestamp(C.RESEARCH_START),
     "oos": pd.Timestamp(C.OOS_START),
 }
 

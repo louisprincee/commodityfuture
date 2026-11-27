@@ -128,6 +128,71 @@ def assert_oos_dates(values, what: str = "data") -> None:
         raise HoldoutViolation(f"{what} 日期越出样本外窗口: {ts.min().date()}..{ts.max().date()}")
 
 
+_DIR_PARQUET_CACHE: dict[tuple[str, str, str], tuple[str, object]] = {}
+
+
+def cached_directory_parquet(source_dir: Path, partition: str, name: str, *,
+                             guard_fn=None, build_fn=None):
+    """把目录下散落的 .pkl 文件合并为单份 Parquet 缓存；源目录任何增删改自动失效。"""
+    import hashlib
+    import json
+    import pandas as pd
+
+    source_dir = Path(source_dir)
+    if not source_dir.is_dir():
+        return None
+    entries = sorted(
+        (entry for entry in _os.scandir(source_dir) if entry.name.endswith(".pkl")),
+        key=lambda entry: entry.name,
+    )
+    if not entries:
+        return None
+    sig_parts = []
+    for entry in entries:
+        if guard_fn is not None and entry.is_symlink():
+            guard_fn(Path(entry.path))
+        stat = entry.stat()
+        sig_parts.append(f"{entry.name}:{stat.st_mtime_ns}:{stat.st_size}")
+    resolved = str(source_dir.resolve())
+    sig = hashlib.sha256("\n".join(sig_parts).encode("utf-8")).hexdigest()
+    mem_key = (resolved, partition, name)
+    cached = _DIR_PARQUET_CACHE.get(mem_key)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+
+    use_disk = (
+        DATA_ROOT == PROJECT_ROOT / "data"
+        and Path(resolved).is_relative_to((PROJECT_ROOT / "data").resolve())
+    )
+    if use_disk:
+        cache_dir = RUNS_DIR / "_cache" / partition
+        pq_path = cache_dir / f"{name}.parquet"
+        meta_path = cache_dir / f"{name}.json"
+        if pq_path.is_file() and meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta.get("source") == resolved and meta.get("sig") == sig:
+                    frame = pd.read_parquet(pq_path)
+                    _DIR_PARQUET_CACHE[mem_key] = (sig, frame)
+                    return frame
+            except Exception:
+                pass
+
+    frame = build_fn(entries)
+    if frame is not None and use_disk:
+        cache_dir = RUNS_DIR / "_cache" / partition
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        pq_tmp = cache_dir / f"{name}.parquet.tmp"
+        meta_tmp = cache_dir / f"{name}.json.tmp"
+        frame.to_parquet(pq_tmp, index=False)
+        _os.replace(pq_tmp, cache_dir / f"{name}.parquet")
+        meta_tmp.write_text(json.dumps({"source": resolved, "sig": sig}), encoding="utf-8")
+        _os.replace(meta_tmp, cache_dir / f"{name}.json")
+    if frame is not None:
+        _DIR_PARQUET_CACHE[mem_key] = (sig, frame)
+    return frame
+
+
 def study_dir(name: str) -> Path:
     """因子研究输出：runs/research/<名称>/。"""
     return RUNS_DIR / "research" / name

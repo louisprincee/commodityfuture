@@ -284,7 +284,6 @@ def evaluate_redefinitions(redefs: dict[str, pd.DataFrame], labels: dict[int, pd
 REDEFINITION_SERIES = (
     ('STICKY_NET_SHARE', '原粘性净多（基线）', '#7a8a96'),
     ('STICKY_PERSIST', '持久同向（20日有效观测）', '#147D89'),
-    ('STICKY_PERSIST_PURE', '持久同向 · 净敞口过滤对照', '#6E9C7B'),
 )
 
 
@@ -300,7 +299,7 @@ def save_factor_view(table: pd.DataFrame, out: Path, filename: str, retained) ->
 
 def plot_redefinition_ic(daily: pd.DataFrame, summary: pd.DataFrame, output: Path, split: str = '2016-01-04',
                          series=REDEFINITION_SERIES,
-                         title: str = '持久同向与净敞口对照 · 2011–2021',
+                         title: str = '持久同向与原粘性净多 · 2011–2021',
                          bar_legend: str = 'lower right') -> None:
     import matplotlib
     matplotlib.use('Agg')

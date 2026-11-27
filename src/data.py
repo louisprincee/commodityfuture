@@ -42,28 +42,37 @@ def load_contracts(partition: str = "research", *, for_execution: bool = False) 
     成交量、成交额与持仓量统一为单边口径。更名前合约保留到自身最后一条行情，
     品种标签改为后继代码；合约代码仍是交易所当时的代码。
     """
+    del for_execution
     root = external_root(partition) / "contracts"
     _guard(root, partition)
-    frames = []
-    for path in sorted(root.glob("*.pkl")):
-        _guard(path, partition)
-        frames.append(pd.read_pickle(path))
-    frames = [f for f in frames if f is not None and not f.empty]
-    if not frames:
+
+    def _build(entries):
+        frames = [pd.read_pickle(entry.path) for entry in entries]
+        frames = [f for f in frames if f is not None and not f.empty]
+        if not frames:
+            raise FileNotFoundError(f"缺少逐合约日行情缓存: {root}")
+        out = pd.concat(frames).reset_index().rename(columns={"order_book_id": "contract"})
+        out["date"] = pd.to_datetime(out["date"]).dt.normalize()
+        out["symbol"] = out["contract"].str.extract(r"^([A-Z]+)\d{4}$", expand=False)
+        if out["symbol"].isna().any():
+            bad = out.loc[out["symbol"].isna(), "contract"].unique()[:5]
+            raise ValueError(f"合约代码无法解析品种: {bad}")
+        if out.duplicated(["contract", "date"]).any():
+            raise ValueError("合约日行情有重复 (contract, date)")
+        if partition == "research":
+            out = apply_legacy_contracts(out)
+        _check_dates(out["date"], partition, "合约日行情")
+        out = to_single_sided(out)
+        return out.sort_values(["symbol", "contract", "date"], kind="mergesort").reset_index(drop=True)
+
+    result = C.cached_directory_parquet(
+        root, partition, "daily_contracts",
+        guard_fn=(lambda p: _guard(p, partition)) if partition == "research" else None,
+        build_fn=_build,
+    )
+    if result is None:
         raise FileNotFoundError(f"缺少逐合约日行情缓存: {root}")
-    out = pd.concat(frames).reset_index().rename(columns={"order_book_id": "contract"})
-    out["date"] = pd.to_datetime(out["date"]).dt.normalize()
-    out["symbol"] = out["contract"].str.extract(r"^([A-Z]+)\d{4}$", expand=False)
-    if out["symbol"].isna().any():
-        bad = out.loc[out["symbol"].isna(), "contract"].unique()[:5]
-        raise ValueError(f"合约代码无法解析品种: {bad}")
-    if out.duplicated(["contract", "date"]).any():
-        raise ValueError("合约日行情有重复 (contract, date)")
-    if partition == "research":
-        out = apply_legacy_contracts(out, for_execution=for_execution)
-    _check_dates(out["date"], partition, "合约日行情")
-    out = to_single_sided(out)
-    return out.sort_values(["symbol", "contract", "date"], kind="mergesort").reset_index(drop=True)
+    return result.copy()
 
 
 # 郑商所更名前代码。日期是后继代码开始交易的日子，不是旧合约的截止日。

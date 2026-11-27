@@ -105,12 +105,19 @@ def seat_turnover_groups(t: dict[str, pd.DataFrame], mkt: pd.DataFrame):
 def net_gross_share(net: pd.DataFrame, gross: pd.DataFrame, mask: pd.DataFrame,
                     *, require_complete: bool = False) -> pd.Series:
     """掩码内可见净头寸占总持仓比例；分母非正时返回缺失。"""
-    num = net.where(mask).sum(axis=1, min_count=1)
-    den = gross.where(mask).sum(axis=1, min_count=1)
-    result = num / den.where(den.gt(0))
+    m = mask.to_numpy(dtype=bool)
+    n_arr = net.to_numpy(dtype=float)
+    g_arr = gross.to_numpy(dtype=float)
+    n_ok = m & np.isfinite(n_arr)
+    g_ok = m & np.isfinite(g_arr)
+    num = np.where(n_ok, n_arr, 0.0).sum(axis=1)
+    den = np.where(g_ok, g_arr, 0.0).sum(axis=1)
+    good = n_ok.any(axis=1) & g_ok.any(axis=1) & (den > 0)
     if require_complete:
-        result = result.where((~mask | (net.notna() & gross.notna())).all(axis=1))
-    return result
+        good &= ~(m & (~np.isfinite(n_arr) | ~np.isfinite(g_arr))).any(axis=1)
+    out = np.full(len(net), np.nan, dtype=float)
+    np.divide(num, den, out=out, where=good)
+    return pd.Series(out, index=net.index)
 
 
 def sticky_net_share(t: dict[str, pd.DataFrame], mkt: pd.DataFrame) -> pd.DataFrame:
@@ -136,23 +143,12 @@ def load_extension_inputs(panel: pd.DataFrame, start: pd.Timestamp, jobs: int, p
     return _load_member_signals(panel, start, partition, jobs, extension=names)
 
 
-_SIGNAL_CACHE: list[tuple[pd.DataFrame, tuple, dict[str, pd.DataFrame], pd.DataFrame]] = []
-_SIGNAL_CACHE_SIZE = 4
+_SIGNAL_CACHE: list[tuple[pd.DataFrame, str, dict]] = []
+_SIGNAL_CACHE_SIZE = 2
 
 
 def _load_member_signals(panel, start, partition, jobs, *, extension: tuple[str, ...] = ()):
-    """同一进程内，同一面板对象、开户日、分区和因子列表的结果直接复用（返回副本）。"""
-    key = (pd.Timestamp(start), partition, tuple(extension))
-    for cached_panel, cached_key, signals, dominant in _SIGNAL_CACHE:
-        if cached_panel is panel and cached_key == key:
-            return {name: value.copy() for name, value in signals.items()}, dominant.copy()
-    signals, dominant = _compute_member_signals(panel, start, partition, jobs, extension=tuple(extension))
-    _SIGNAL_CACHE.append((panel, key, signals, dominant))
-    del _SIGNAL_CACHE[:-_SIGNAL_CACHE_SIZE]
-    return {name: value.copy() for name, value in signals.items()}, dominant.copy()
-
-
-def _compute_member_signals(panel, start, partition, jobs, *, extension: tuple[str, ...] = ()):
+    """同一进程内按面板对象与榜单来源复用已算因子与品种榜单，跨策略/跨窗口不重复重算。"""
     from joblib import Parallel, delayed
 
     start = pd.Timestamp(start)
@@ -162,27 +158,61 @@ def _compute_member_signals(panel, start, partition, jobs, *, extension: tuple[s
         C.assert_oos_dates(panel.loc[panel["date"].ge(start), "date"], "粘性净多样本外日面板")
     elif partition != "combined":
         raise ValueError(f"未知分区 {partition}")
+
+    rank_source = "research" if partition == "research" else "span"
     eligible, dominant = D.member_universe(panel, start, partition)
-    volume = panel.pivot(index="date", columns="symbol", values="volume_total")
-    oi = panel.pivot(index="date", columns="symbol", values="oi_total")
+    state = None
+    for cached_panel, cached_source, cached_state in _SIGNAL_CACHE:
+        if cached_panel is panel and cached_source == rank_source:
+            state = cached_state
+            break
+    if state is None:
+        state = {
+            "tables": {},
+            "factors": {},
+            "volume": panel.pivot(index="date", columns="symbol", values="volume_total"),
+            "oi": panel.pivot(index="date", columns="symbol", values="oi_total"),
+        }
+        _SIGNAL_CACHE.append((panel, rank_source, state))
+        del _SIGNAL_CACHE[:-_SIGNAL_CACHE_SIZE]
 
-    def one_symbol(symbol):
-        tables = member_tables(symbol, eligible.index, top20=True, partition=partition)
-        market = pd.DataFrame({"volume": volume[symbol], "oi": oi[symbol]}, index=eligible.index)
-        result = sticky_net_share(tables, market)[["STICKY_NET_SHARE"]]
-        if extension:
-            ext = extension_factors(tables, market, names=extension)
-            for col in extension:
-                result[col] = ext[col]
-        return result
+    wanted = ["STICKY_NET_SHARE", *extension]
+    missing_syms = [
+        sym for sym in eligible.columns
+        if sym not in state["factors"] or any(name not in state["factors"][sym] for name in wanted)
+    ]
+    if missing_syms:
+        missing_tables = [sym for sym in missing_syms if sym not in state["tables"]]
+        if missing_tables:
+            loaded = Parallel(n_jobs=jobs, prefer="threads")(
+                delayed(member_tables)(sym, eligible.index, top20=True, partition=partition)
+                for sym in missing_tables
+            )
+            state["tables"].update(zip(missing_tables, loaded))
 
-    values = Parallel(n_jobs=jobs, prefer="threads")(
-        delayed(one_symbol)(symbol) for symbol in eligible.columns)
-    names = ["STICKY_NET_SHARE", *extension]
+        def compute_one(sym):
+            tables = state["tables"][sym]
+            market = pd.DataFrame({"volume": state["volume"][sym], "oi": state["oi"][sym]}, index=eligible.index)
+            cached = state["factors"].get(sym)
+            result = pd.DataFrame(index=eligible.index) if cached is None else cached.copy()
+            if "STICKY_NET_SHARE" not in result:
+                result["STICKY_NET_SHARE"] = sticky_net_share(tables, market)["STICKY_NET_SHARE"]
+            need_ext = tuple(name for name in extension if name not in result)
+            if need_ext:
+                ext = extension_factors(tables, market, names=need_ext)
+                for col in need_ext:
+                    result[col] = ext[col]
+            return result
+
+        computed = Parallel(n_jobs=jobs, prefer="threads")(delayed(compute_one)(sym) for sym in missing_syms)
+        state["factors"].update(zip(missing_syms, computed))
+
     signals = {}
-    for name in names:
-        matrix = pd.DataFrame({symbol: value[name] for symbol, value in zip(eligible.columns, values)},
-                              index=eligible.index, columns=eligible.columns)
+    for name in wanted:
+        matrix = pd.DataFrame(
+            {sym: state["factors"][sym][name] for sym in eligible.columns},
+            index=eligible.index, columns=eligible.columns,
+        )
         signals[name] = matrix.where(eligible).loc[start:]
     return signals, dominant
 
@@ -448,21 +478,9 @@ def _impute(long: pd.DataFrame, short: pd.DataFrame,
 
 def profile_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:
     """在固定日期网格上计算连续上榜、方向稳定、四档插补与持仓流因子（纯因子计算，无外部读写）。"""
-    index = market.index
-    if not index.is_unique or not index.is_monotonic_increasing:
-        raise ValueError("market dates must be unique and increasing")
-    columns = tables["L"].columns
-    for key in ("S", "V", "dL", "dS"):
-        columns = columns.union(tables[key].columns, sort=False)
-    ranked = tables["ranked"].reindex(index).fillna(False).astype(bool)
-    t = {key: tables[key].reindex(index=index, columns=columns).astype(float)
-         for key in ("L", "S", "V", "dL", "dS")}
-    t = {key: value.where(np.isfinite(value)).where(ranked, axis=0) for key, value in t.items()}
-    t["ranked"] = ranked
-    m = market[["oi", "volume"]].astype(float)
-    m = m.where(np.isfinite(m))
-    valid = ranked & m["oi"].gt(0) & m["volume"].gt(0)
-    long, short = t["L"], t["S"]
+    t, m, valid = _aligned_tables(tables, market)
+    index = m.index
+    long, short, ranked = t["L"], t["S"], t["ranked"]
     net, gross, sticky, spec = seat_turnover_groups(t, m)
     held = gross.gt(0) & ranked.to_numpy()[:, None]
     presence = (long.notna() | short.notna()) & ranked.to_numpy()[:, None]
@@ -472,7 +490,7 @@ def profile_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd
     present_array = presence.to_numpy()
     for row in range(len(index)):
         streak[row] = np.where(present_array[row], (streak[row - 1] if row else 0) + 1, 0)
-    run = pd.DataFrame(streak, index=index, columns=columns)
+    run = pd.DataFrame(streak, index=index, columns=long.columns)
     out["RUN_LONG"] = net_gross_share(net, gross, held & run.ge(20))
     direction = np.sign(net).where(presence).rolling(20, min_periods=20).mean().abs()
     out["DIR_STABLE"] = net_gross_share(net, gross, held & direction.ge(0.8))
@@ -541,15 +559,9 @@ def rank_composite(*scores: pd.DataFrame) -> pd.DataFrame:
     return sum(ranks) / len(ranks)
 
 
-def _persist_mask(t: dict[str, pd.DataFrame], net: pd.DataFrame, held: pd.DataFrame) -> pd.DataFrame:
-    """冻结的持续性筛选：方向均值需 20 个有效上榜观测，一致性至少 0.8。
-
-    因此现有实现实际比名义上的“20 日上榜至少 15 日”更严格；保留已评估规则。
-    """
-    presence = (t["L"].notna() | t["S"].notna()) & t["ranked"].to_numpy()[:, None]
-    present_20d = presence.astype(float).rolling(20, min_periods=20).sum()
-    dir_cons_20d = np.sign(net).where(presence).rolling(20, min_periods=20).mean().abs()
-    return held & present_20d.ge(15) & dir_cons_20d.ge(0.8)
+def _persist_mask(net: pd.DataFrame, held: pd.DataFrame) -> pd.DataFrame:
+    """最近 20 日均在榜持仓且方向一致（|20 日符号均值| >= 0.8）。"""
+    return held & np.sign(net).where(held).rolling(20, min_periods=20).mean().abs().ge(0.8)
 
 
 def _aligned_tables(tables: dict[str, pd.DataFrame], market: pd.DataFrame):
@@ -636,7 +648,7 @@ def extension_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame,
         "STICKY_FLOW": flow,
         "STICKY_IDENTITY": lambda: net_gross_share(net, gross, identity()),
         "SEAT_SKILL_NET": skill_net,
-        "STICKY_PERSIST_IDENTITY": lambda: net_gross_share(net, gross, identity() & _persist_mask(t, net, held)),
+        "STICKY_PERSIST_IDENTITY": lambda: net_gross_share(net, gross, identity() & _persist_mask(net, held)),
         "STICKY_FLOW5": lambda: flow().where(valid).rolling(5, min_periods=5).mean(),
         "STICKY_FLOW10": lambda: flow().where(valid).rolling(10, min_periods=10).mean(),
     }
@@ -654,28 +666,16 @@ def extension_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame,
 
 def redefinition_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:
     """事前冻结的粘性席位重定义因子族（纯行为持续、低换仓强度、去双边对锁）。"""
-    index = market.index
-    if not index.is_unique or not index.is_monotonic_increasing:
-        raise ValueError("market dates must be unique and increasing")
-    columns = tables["L"].columns
-    for key in ("S", "V", "dL", "dS"):
-        columns = columns.union(tables[key].columns, sort=False)
-    ranked = tables["ranked"].reindex(index).fillna(False).astype(bool)
-    t = {key: tables[key].reindex(index=index, columns=columns).astype(float)
-         for key in ("L", "S", "V", "dL", "dS")}
-    t = {key: value.where(np.isfinite(value)).where(ranked, axis=0) for key, value in t.items()}
-    t["ranked"] = ranked
-    m = market[["oi", "volume"]].astype(float)
-    m = m.where(np.isfinite(m))
-    valid = ranked & m["oi"].gt(0) & m["volume"].gt(0)
+    t, m, valid = _aligned_tables(tables, market)
+    index = m.index
 
     net, gross, sticky, _ = seat_turnover_groups(t, m)
-    held = gross.gt(0) & ranked.to_numpy()[:, None]
+    held = gross.gt(0) & t["ranked"].to_numpy()[:, None]
     both_sides = t["L"].notna() & t["S"].notna()
     purity = net.abs() / gross.where(gross.gt(0))
     balanced = both_sides & purity.lt(0.30)
 
-    persist_mask = _persist_mask(t, net, held)
+    persist_mask = _persist_mask(net, held)
 
     # 低换仓强度：需该侧在榜持仓披露增减量（任一应披露侧缺失 dL/dS 则当日调仓强度未知）
     long_ok = t["L"].isna() | t["dL"].notna()

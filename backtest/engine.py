@@ -719,9 +719,9 @@ def _span_market(bars: pd.DataFrame, research_fees: pd.DataFrame, oos_fees: pd.D
     return {**research, **oos}
 
 
-def _partition_inputs(partition: str):
+def _partition_inputs(partition: str, *, eval_panel: pd.DataFrame | None = None):
     if partition == "combined":
-        panel = D.load_evaluation_panel()
+        panel = D.load_evaluation_panel() if eval_panel is None else eval_panel
         panel = panel.loc[panel["date"].between(WARMUP_START, pd.Timestamp(C.DEFAULT_OOS_END))]
         if panel.empty or panel["date"].min() > WARMUP_START:
             raise ValueError("缺少完整 2010 年预热面板")
@@ -730,7 +730,7 @@ def _partition_inputs(partition: str):
         start, root, data_partition = BACKTEST_START, None, "combined"
         check_dates = _assert_continuous_dates
     elif partition == "oos":
-        panel = D.load_evaluation_panel()
+        panel = D.load_evaluation_panel() if eval_panel is None else eval_panel
         start, root, data_partition = pd.Timestamp(C.OOS_START), C.OOS_EXECUTION_PARAMETERS, "oos"
         check_dates = C.assert_oos_dates
         fees = _oos_fee_fallback(*_span_fees())
@@ -790,7 +790,8 @@ def _save_book_run(book: str, targets: Targets, contracts: pd.DataFrame, market:
     return rows, main_ledger
 
 
-def _run_partition(module, partition: str, base_out: Path, jobs: int, *, inputs=None) -> None:
+def _run_partition(module, partition: str, base_out: Path, jobs: int, *, inputs=None,
+                   market_cache: dict | None = None) -> None:
     panel, bars, fees, start, root, data_partition, check_dates = (
         _partition_inputs(partition) if inputs is None else inputs)
     benchmark = module is None
@@ -804,11 +805,16 @@ def _run_partition(module, partition: str, base_out: Path, jobs: int, *, inputs=
     contracts = targets.dominant.shift(1).reindex_like(targets.weights)
     check_dates(contracts.index, "策略净值交易日")
     ids = {contract for contract in contracts.to_numpy().ravel() if isinstance(contract, str)}
-    if partition == "combined":
-        market = _span_market(bars, fees[0], fees[1], ids, start)
-    else:
-        market = load_market(bars, fees, ids, start, root=root / "contracts",
-                             flat_margin=FLAT_MARGIN, partition=data_partition)
+    key = (partition, frozenset(ids))
+    market = market_cache.get(key) if market_cache is not None else None
+    if market is None:
+        if partition == "combined":
+            market = _span_market(bars, fees[0], fees[1], ids, start)
+        else:
+            market = load_market(bars, fees, ids, start, root=root / "contracts",
+                                 flat_margin=FLAT_MARGIN, partition=data_partition)
+        if market_cache is not None:
+            market_cache[key] = market
     _save_book_run(book, targets, contracts, market, start, base_out / partition_directory_name(partition),
                    neutral=not benchmark, hold=hold, curve_file=curve_file,
                    save_details=True)
@@ -818,22 +824,25 @@ def _read_curve(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, parse_dates=["date"]).set_index("date") if path.is_file() else pd.DataFrame()
 
 
-def _benchmark_curve(partition: str, jobs: int, *, reuse: bool, inputs=None) -> pd.Series:
+def _benchmark_curve(partition: str, jobs: int, *, reuse: bool, inputs=None,
+                     market_cache: dict | None = None) -> pd.Series:
     base = C.strategy_dir("benchmark")
     path = base / partition_directory_name(partition) / "equity_curves.csv"
     cached = _read_curve(path) if reuse else pd.DataFrame()
     if BENCHMARK_BOOK not in cached:
-        _run_partition(None, partition, base, jobs, inputs=inputs)
+        _run_partition(None, partition, base, jobs, inputs=inputs, market_cache=market_cache)
         cached = _read_curve(path)
     return _chart_frame(cached, [BENCHMARK_BOOK])[BENCHMARK_BOOK]
 
 
 def _evaluate_partition(selected: list[str], partition: str, jobs: int, *, reuse: bool,
-                        benchmark: pd.Series | None = None) -> pd.DataFrame:
+                        benchmark: pd.Series | None = None,
+                        eval_panel: pd.DataFrame | None = None) -> pd.DataFrame:
     """独立读取或生成基准和所选策略的分区账本。"""
-    inputs = None if reuse else _partition_inputs(partition)
+    inputs = None if reuse else _partition_inputs(partition, eval_panel=eval_panel)
+    market_cache: dict | None = None if reuse else {}
     if benchmark is None:
-        benchmark = _benchmark_curve(partition, jobs, reuse=reuse, inputs=inputs)
+        benchmark = _benchmark_curve(partition, jobs, reuse=reuse, inputs=inputs, market_cache=market_cache)
     check_dates = C.assert_oos_dates if partition == "oos" else C.assert_no_holdout_dates
     check_dates(benchmark.index, f"{partition} 等权基准净值")
     curves = []
@@ -842,7 +851,7 @@ def _evaluate_partition(selected: list[str], partition: str, jobs: int, *, reuse
         path = base_out / partition / module.EQUITY_CURVE_FILE
         cached = _read_curve(path) if reuse else pd.DataFrame()
         if module.MAIN_BOOK not in cached:
-            _run_partition(module, partition, base_out, jobs, inputs=inputs)
+            _run_partition(module, partition, base_out, jobs, inputs=inputs, market_cache=market_cache)
             cached = _read_curve(path)
         curve = _chart_frame(cached, [module.MAIN_BOOK])[module.MAIN_BOOK]
         check_dates(curve.index, f"{name} {partition} 净值")
@@ -854,15 +863,17 @@ def _evaluate_partition(selected: list[str], partition: str, jobs: int, *, reuse
     return pd.concat([*curves, benchmark], axis=1)
 
 
-def _evaluate_continuous(selected: list[str], jobs: int) -> pd.DataFrame:
+def _evaluate_continuous(selected: list[str], jobs: int, *,
+                         eval_panel: pd.DataFrame | None = None) -> pd.DataFrame:
     """2011–2025 用同一账户连续回测。仓位、保证金和重叠持有都跨过 2022 年。"""
-    inputs = _partition_inputs("combined")
-    benchmark = _benchmark_curve("combined", jobs, reuse=False, inputs=inputs)
+    inputs = _partition_inputs("combined", eval_panel=eval_panel)
+    market_cache: dict = {}
+    benchmark = _benchmark_curve("combined", jobs, reuse=False, inputs=inputs, market_cache=market_cache)
     _assert_continuous_dates(benchmark.index, "完整区间等权基准净值")
     curves = []
     for name in selected:
         module, base_out = MODULES[name], book_dir(name)
-        _run_partition(module, "combined", base_out, jobs, inputs=inputs)
+        _run_partition(module, "combined", base_out, jobs, inputs=inputs, market_cache=market_cache)
         path = base_out / partition_directory_name("combined") / module.EQUITY_CURVE_FILE
         curve = _chart_frame(_read_curve(path), [module.MAIN_BOOK])[module.MAIN_BOOK]
         _assert_continuous_dates(curve.index, f"{name} 完整区间净值")
@@ -874,9 +885,13 @@ def _evaluate_continuous(selected: list[str], jobs: int) -> pd.DataFrame:
 
 def _run_combined(selected: list[str], jobs: int) -> dict[str, pd.DataFrame]:
     """研究期和样本外各自开户。完整区间另跑一条连续账本，图上的夏普仍取两个独立分区。"""
-    partitions = {split: _evaluate_partition(selected, split, jobs, reuse=False)
-                  for split in C.PARTITIONS}
-    combined = _evaluate_continuous(selected, jobs)
+    eval_panel = D.load_evaluation_panel()
+    partitions = {
+        split: _evaluate_partition(selected, split, jobs, reuse=False,
+                                   eval_panel=eval_panel if split == "oos" else None)
+        for split in C.PARTITIONS
+    }
+    combined = _evaluate_continuous(selected, jobs, eval_panel=eval_panel)
     for name in selected:
         # 连续账本的 summary.csv（含 2 跳）已由 _run_partition 写出，这里只补画净值图。
         _plot_book_figures(combined, book_dir(name) / partition_directory_name("combined"),

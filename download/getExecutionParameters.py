@@ -78,6 +78,10 @@ def contract_spans(partition: str, start=None, end=None) -> pd.DataFrame:
                 continue
             dominant, _second = D.adjusted_dominant(symbol, partition, multipliers, bars)
             wanted.update(dominant.loc[(dominant.index >= start) & (dominant.index <= end)].dropna().unique())
+    else:
+        # 连续账户把研究期末的持仓带进样本外；这些旧主力在样本外仍有行情，需要其样本外日期的真实参数才能平仓。
+        for symbol in D.symbols_with_data("research"):
+            wanted.update(D.load_dominant(symbol, 1, "research").dropna().unique())
     bars = bars[["contract", "date"]]
     return (
         bars.loc[bars["contract"].isin(wanted) & bars["date"].between(start, end)]

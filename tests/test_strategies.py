@@ -125,3 +125,53 @@ def test_sticky_factor_loader_matches_historical_inputs_and_rejects_sealed_dates
     assert sticky.iloc[4, 0] == pytest.approx(7 / 13)
     with pytest.raises(M.C.HoldoutViolation):
         M.load_sticky_inputs(panel.assign(date=pd.date_range("2022-01-04", periods=6)), start, "research", 1)
+
+
+def test_gate_without_veto_or_buffer_equals_tail_weights():
+    from strategies.common import gate_weights
+    from strategies.common import tail_weights
+
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range("2012-01-02", periods=40)
+    names = [f"A{i:02d}" for i in range(25)]
+    score = pd.DataFrame(rng.normal(size=(40, 25)), index=dates, columns=names)
+    score.iloc[3, :20] = np.nan
+    flow = pd.DataFrame(rng.normal(size=(40, 25)), index=dates, columns=names)
+    pd.testing.assert_frame_equal(gate_weights(score, flow, veto=False, buffer=False),
+                                  tail_weights(score), check_dtype=False)
+
+
+def test_gate_veto_drops_adverse_flow_and_ignores_missing_flow():
+    from strategies.common import gate_weights
+
+    names = [f"A{i:02d}" for i in range(20)]
+    day = pd.bdate_range("2012-01-02", periods=1)
+    score = pd.DataFrame([np.arange(20.)], index=day, columns=names)
+    flow = pd.DataFrame([np.arange(20.)], index=day, columns=names)
+    flow["A19"] = 0.0     # best identity, flow in the bottom 20%: vetoed long
+    flow["A00"] = 100.0   # worst identity, flow in the top 20%: vetoed short
+    w = gate_weights(score, flow, veto=True, buffer=False).iloc[0]
+    assert w.loc[w.gt(0)].index.tolist() == ["A18"]
+    assert w.loc[w.lt(0)].index.tolist() == ["A01"]
+    flow.loc[:, ["A19", "A00"]] = np.nan
+    w = gate_weights(score, flow, veto=True, buffer=False).iloc[0]
+    assert w.loc[w.gt(0)].index.tolist() == ["A18", "A19"]
+
+
+def test_gate_buffer_keeps_incumbent_inside_band_of_expiring_cohort():
+    from strategies.common import gate_weights
+
+    names = [f"A{i:02d}" for i in range(20)]
+    days = pd.bdate_range("2012-01-02", periods=12)
+    base = np.arange(20.)
+    rows = np.tile(base, (12, 1))
+    # Day 10: A19 falls to fourth (inside the 20% band of 4, outside the 10% tail of 2).
+    rows[10] = base
+    rows[10, 19], rows[10, 16] = 16.0, 19.0
+    score = pd.DataFrame(rows, index=days, columns=names)
+    flow = pd.DataFrame(1.0, index=days, columns=names)
+    plain = gate_weights(score, flow, veto=False, buffer=False).iloc[10]
+    kept = gate_weights(score, flow, veto=False, buffer=True).iloc[10]
+    assert plain.loc[plain.gt(0)].index.tolist() == ["A16", "A18"]
+    assert sorted(kept.loc[kept.gt(0)].index) == ["A18", "A19"]
+    assert kept.gt(0).sum() == 2

@@ -31,7 +31,7 @@ from costs import load_market  # noqa: E402
 from research.settings import XS_POSITION  # noqa: E402
 from strategies import Targets  # noqa: E402
 from strategies.common import HORIZON, NAME_CAP, TARGET_MULTIPLIER  # noqa: E402
-from strategies.member import persist_identity, sticky_net  # noqa: E402
+from strategies.member import persist_identity, persist_identity_flow_veto, sticky_net  # noqa: E402
 from strategies.member_price import sticky_basis_skew  # noqa: E402
 
 CAPITAL_CNY = 10_000_000
@@ -609,7 +609,7 @@ def plot_equity_drawdown(
 #   runs/strategies/<策略>/{research,oos,2011-2025,legacy_research}/
 #   runs/strategies/benchmark/{research,oos,2011-2025,legacy_research}/
 #   runs/strategies/comparison/{research,oos,2011-2025,legacy_research}/
-FAMILIES = {"member": (sticky_net, persist_identity), "member_price": (sticky_basis_skew,)}
+FAMILIES = {"member": (sticky_net, persist_identity, persist_identity_flow_veto), "member_price": (sticky_basis_skew,)}
 MODULES = {module.STRATEGY_ID: module for books in FAMILIES.values() for module in books}
 FAMILY_OF = {module.STRATEGY_ID: family for family, books in FAMILIES.items() for module in books}
 BOOK_LABELS = {
@@ -618,9 +618,15 @@ BOOK_LABELS = {
     "IDENTITY_MATCHED": "持久粘性身份（共同样本）",
     "IDENTITY_FLOW5": "身份 + 5 日持仓流",
     "IDENTITY_FLOW10": "身份 + 10 日持仓流",
+    "IDENTITY_CONTROL": "持久粘性身份（对照）",
+    "IDENTITY_VETO": "身份 + 持仓流否决",
+    "IDENTITY_BUFFER": "身份 + 宽带缓冲",
+    "IDENTITY_GATE": "身份 + 否决 + 缓冲",
 }
 # member_price 只保留源码与各自单策略图，不进对比。
 COMPARED = [module.STRATEGY_ID for module in FAMILIES["member"]]
+# 尚无样本外评价协议的现役策略：只运行研究期；--oos 与 2011–2025 跳过，不读 2022–2025。
+RESEARCH_ONLY = {persist_identity_flow_veto.STRATEGY_ID}
 PERIOD_LABELS = {"research": "研究期 2011–2021", "legacy_research": "旧研究期 2016–2021", "oos": "样本外 2022–2025"}
 def partition_directory_name(partition: str) -> str:
     if partition == "combined":
@@ -955,6 +961,57 @@ def _run_flow_smoothing_study(jobs: int) -> None:
                       title="身份 + 持仓流平滑窗口 · 研究期同样本 5 日 / 10 日探索")
 
 
+GATE_BOOKS = ("IDENTITY_CONTROL", "IDENTITY_VETO", "IDENTITY_BUFFER", "IDENTITY_GATE")
+
+
+def _run_identity_gate_study(jobs: int) -> None:
+    """仅研究期：持仓流开仓否决与身份宽带缓冲相对持久身份的净增量（GATE_PROTOCOL）。"""
+    from research.ic.statistics import mean_inference
+    import json
+
+    out = C.strategy_dir("identity_flow_gate") / "research"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "protocol.json").write_text(json.dumps(persist_identity.GATE_PROTOCOL, ensure_ascii=False, indent=2),
+                                       encoding="utf-8")
+    panel, bars, fees, start, root, partition, check_dates = _partition_inputs("research")
+    books = persist_identity.build_gate_study(panel, start, jobs)
+    calls = {book: target.dominant.shift(1).reindex_like(target.weights) for book, target in books.items()}
+    ids = {c for matrix in calls.values() for c in matrix.to_numpy().ravel() if isinstance(c, str)}
+    market = load_market(bars, fees, ids, start, root=root / "contracts", flat_margin=FLAT_MARGIN,
+                         partition=partition)
+    summaries, curves, ledgers = [], {}, {}
+    for book in GATE_BOOKS:
+        target = books[book]
+        check_dates(target.weights.index, "身份持仓流门控实验")
+        rows, ledger = _save_book_run(book, target, calls[book], market, start, out / book.lower(),
+                                      neutral=True, hold=HORIZON, save_details=True)
+        summaries.extend(rows)
+        curves[book], ledgers[book] = ledger.equity, ledger
+    equity = pd.DataFrame(curves)
+    equity.to_csv(out / "equity_curves.csv", index_label="date")
+    summary = pd.DataFrame(summaries)
+    summary.to_csv(out / "summary.csv", index=False)
+    yearly_returns(equity).to_csv(out / "yearly_returns.csv", index=False)
+    control = ledgers["IDENTITY_CONTROL"]
+    one_tick = summary.loc[summary.ticks.eq(SLIPPAGE_TICKS)].set_index("book")
+    gains = []
+    for book in GATE_BOOKS[1:]:
+        gain = ledgers[book]["return"] - control["return"]
+        for period, (left, right) in {"2011-2021": (None, None), "2011-2015": (None, "2015-12-31"),
+                                      "2016-2021": ("2016-01-01", None)}.items():
+            stats = mean_inference(gain.loc[left:right], 20)
+            stats["mean_daily_gain"] = stats.pop("mean_ic")
+            gains.append(dict(
+                book=book, control="IDENTITY_CONTROL", ticks=SLIPPAGE_TICKS, period=period,
+                primary=book == "IDENTITY_GATE" and period == "2011-2021",
+                ann_gain=stats["mean_daily_gain"] * TD, ann_ci_low=stats["ci_low"] * TD,
+                ann_ci_high=stats["ci_high"] * TD, hac_lags=20,
+                turnover_ratio=one_tick.turnover[book] / one_tick.turnover["IDENTITY_CONTROL"], **stats))
+    pd.DataFrame(gains).to_csv(out / "paired_return_gain.csv", index=False)
+    _plot_performance(equity.rename(columns=BOOK_LABELS) / CAPITAL_CNY, out / "overview.png",
+                      title="持久身份 + 持仓流开仓否决 / 身份宽带缓冲 · 研究期探索")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m backtest.engine")
     parser.add_argument("strategy", nargs="?", choices=list(MODULES),
@@ -969,7 +1026,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--flow-smoothing-study", action="store_true",
                         help="仅研究期的身份 + 持仓流 5/10 日平滑对照，不运行 OOS")
+    parser.add_argument("--identity-gate-study", action="store_true",
+                        help="仅研究期的身份 + 持仓流开仓否决 / 宽带缓冲对照，不运行 OOS")
     args = parser.parse_args(argv)
+    if args.identity_gate_study:
+        if (args.flow_smoothing_study or args.strategy or args.family or args.start is not None
+                or args.end is not None or args.partition not in (None, "research")):
+            parser.error("门控实验只允许 --research，不与策略或其他区间搭配")
+        _run_identity_gate_study(args.jobs)
+        return 0
     if args.flow_smoothing_study:
         if (args.strategy or args.family or args.start is not None or args.end is not None
                 or args.partition not in (None, "research")):
@@ -998,8 +1063,17 @@ def main(argv: list[str]) -> int:
     else:
         families = [args.family] if args.family else list(FAMILIES)
         selected = [module.STRATEGY_ID for family in families for module in FAMILIES[family]]
-    compare = all(name in selected for name in COMPARED)
-    columns = [*(MODULES[name].MAIN_BOOK for name in COMPARED), BENCHMARK_BOOK]
+    touches_oos = partition in ("oos", "combined")
+    if touches_oos:
+        sealed = [name for name in selected if name in RESEARCH_ONLY]
+        if args.strategy and sealed:
+            parser.error(f"{args.strategy} 尚无样本外评价协议，只允许 --research")
+        selected = [name for name in selected if name not in RESEARCH_ONLY]
+        if sealed:
+            print(f"跳过尚无样本外协议的策略: {', '.join(sealed)}")
+    compared = [name for name in COMPARED if not (touches_oos and name in RESEARCH_ONLY)]
+    compare = all(name in selected for name in compared)
+    columns = [*(MODULES[name].MAIN_BOOK for name in compared), BENCHMARK_BOOK]
     if partition == "combined":
         partitions = _run_combined(selected, args.jobs)
         if compare:
@@ -1008,12 +1082,15 @@ def main(argv: list[str]) -> int:
             oos_sharpe = _period_sharpe(partitions["oos"])
             for split, equity in partitions.items():
                 full = split == "combined"
-                write_comparison(split, COMPARED, equity, research_sharpe=research_sharpe if full else None,
+                # 研究期对比图保留 --research 的完整版本，不用缺研究期独有策略的子集覆盖。
+                if split == "research" and compared != COMPARED:
+                    continue
+                write_comparison(split, compared, equity, research_sharpe=research_sharpe if full else None,
                                  oos_sharpe=oos_sharpe if full else None)
         return 0
     equity = _evaluate_partition(selected, partition, args.jobs, reuse=False)
     if compare:
-        write_comparison(partition, COMPARED, equity[columns])
+        write_comparison(partition, compared, equity[columns])
     return 0
 
 

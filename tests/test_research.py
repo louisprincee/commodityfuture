@@ -114,6 +114,24 @@ def test_extension_factors_use_only_information_known_at_the_close():
                                    check_names=False)
 
 
+def test_extension_factor_subset_matches_full_computation():
+    from research.factors.member import CROWDING_META, extension_factors
+
+    rng = np.random.default_rng(5)
+    days = pd.bdate_range("2015-01-02", periods=300)
+    seats = [f"m{i}" for i in range(8)]
+    draw = lambda: pd.DataFrame(rng.uniform(1, 50, (300, 8)), index=days, columns=seats)
+    tables = {"L": draw(), "S": draw(), "V": draw(), "dL": draw() - 25, "dS": draw() - 25,
+              "ranked": pd.Series(rng.uniform(size=300) > .1, index=days)}
+    market = pd.DataFrame({"oi": rng.uniform(400, 600, 300), "volume": rng.uniform(2000, 3000, 300)}, index=days)
+    full = extension_factors(tables, market)
+    for names in (("STICKY_PERSIST_IDENTITY",), ("STICKY_FLOW5", "STICKY_PERSIST_IDENTITY"),
+                  (next(iter(CROWDING_META)), "STICKY_Z250")):
+        pd.testing.assert_frame_equal(extension_factors(tables, market, names=names), full[list(names)])
+    with pytest.raises(KeyError):
+        extension_factors(tables, market, names=("NOT_A_FACTOR",))
+
+
 def test_persist_identity_requires_both_seat_conditions():
     from research.factors.member import extension_factors
 

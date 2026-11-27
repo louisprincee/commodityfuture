@@ -6,9 +6,10 @@ import pytest
 from backtest import engine as P
 
 
-def test_only_three_active_strategies_are_registered_and_continuous_results_use_date_folder():
-    assert set(P.MODULES) == {"sticky_net", "persist_identity", "sticky_basis_skew"}
-    assert P.COMPARED == ["sticky_net", "persist_identity"]
+def test_only_four_active_strategies_are_registered_and_continuous_results_use_date_folder():
+    assert set(P.MODULES) == {"sticky_net", "persist_identity", "persist_identity_flow_veto", "sticky_basis_skew"}
+    assert P.COMPARED == ["sticky_net", "persist_identity", "persist_identity_flow_veto"]
+    assert P.RESEARCH_ONLY == {"persist_identity_flow_veto"}
     assert P.partition_directory_name("combined") == "2011-2025"
     assert P.partition_directory_name("research") == "research"
 
@@ -456,3 +457,23 @@ def test_engine_research_window_uses_2010_warmup_and_preserves_legacy(monkeypatc
     _, _, _, legacy_start, _, legacy_part, _ = P._partition_inputs("legacy_research")
     assert legacy_start == P.LEGACY_START == pd.Timestamp("2016-01-04")
     assert legacy_part == "research"
+
+
+def test_research_only_strategy_never_reaches_oos(monkeypatch):
+    seen = []
+    books = pd.DataFrame(columns=[*(m.MAIN_BOOK for m in P.MODULES.values()), P.BENCHMARK_BOOK])
+    monkeypatch.setattr(P, "_evaluate_partition",
+                        lambda selected, partition, jobs, reuse: seen.append((partition, list(selected))) or books)
+    monkeypatch.setattr(P, "write_comparison", lambda *a, **k: seen.append(("comparison", list(a[1]))))
+    monkeypatch.setattr(P, "_run_combined", lambda selected, jobs: seen.append(("combined", list(selected)))
+                        or {split: books for split in ("research", "oos", "combined")})
+    with pytest.raises(SystemExit):
+        P.main(["persist_identity_flow_veto", "--oos"])
+    with pytest.raises(SystemExit):
+        P.main(["persist_identity_flow_veto", "--start", "2011", "--end", "2025"])
+    assert seen == []
+    P.main(["--family", "member", "--oos"])
+    P.main(["--family", "member", "--start", "2011", "--end", "2025"])
+    assert all("persist_identity_flow_veto" not in names for _, names in seen)
+    assert ("oos", ["sticky_net", "persist_identity"]) in seen
+    assert ("combined", ["sticky_net", "persist_identity"]) in seen

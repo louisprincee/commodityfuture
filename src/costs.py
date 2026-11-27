@@ -109,6 +109,69 @@ def carry_forward_fees(bars: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+_CONTRACT_TABLES: dict[tuple, pd.DataFrame | None] = {}
+
+
+def _contract_table(path: Path, contract: str, partition: str, check_dates, what: str) -> pd.DataFrame | None:
+    """读取单个合约的执行参数表。同一进程内按路径、修改时间和大小缓存；文件一变即重读。"""
+    try:
+        stat = path.stat()
+        version = (stat.st_mtime_ns, stat.st_size)
+    except FileNotFoundError:
+        version = None
+    key = (str(path), partition, version)
+    if key not in _CONTRACT_TABLES:
+        if partition == "research":
+            C.assert_research_only(path)
+        table = None
+        if path.is_file():
+            raw = pd.read_pickle(path)
+            check_dates(raw.index, f"{contract} {what}")
+            if not raw.empty:
+                table = raw.rename_axis("date").reset_index().assign(contract=contract)
+        _CONTRACT_TABLES[key] = table
+    return _CONTRACT_TABLES[key]
+
+
+def _quote_fields(bars: pd.DataFrame, flat_margin: float | None) -> dict[str, list]:
+    """逐行规则的向量化版本：保证金、成交容量、单笔上下限与持仓限额。"""
+    ratio_long = bars.long_margin_ratio.to_numpy(float)
+    ratio_short = bars.short_margin_ratio.to_numpy(float)
+    ratio_long = np.where((ratio_long > 0) & (ratio_long <= 1), ratio_long, np.nan)
+    ratio_short = np.where((ratio_short > 0) & (ratio_short <= 1), ratio_short, np.nan)
+    known_margin = np.isfinite(ratio_long) & np.isfinite(ratio_short)
+    up, down = bars.limit_up.to_numpy(float), bars.limit_down.to_numpy(float)
+    known_limits = np.isfinite(up) & (up > 0) & np.isfinite(down) & (down > 0)
+    prior = bars.prior_volume.to_numpy(float) * VOLUME_FRACTION
+    volume_cap = np.where(np.isfinite(prior), np.floor(np.where(np.isfinite(prior), prior, 0)), 0).astype(np.int64)
+    fee_known = bars.commission_type.isin(("by_volume", "by_money")).to_numpy()
+    opening = fee_known & known_margin & known_limits & bars.last_trading_date.notna().to_numpy()
+
+    def positive(values, default):
+        good = np.isfinite(values) & (values > 0)
+        whole = np.floor(np.where(good, values, 1))
+        return np.where(good, np.maximum(1, whole), default).astype(np.int64)
+
+    def margin(ratio):
+        if flat_margin is not None:
+            return np.full(len(ratio), flat_margin, dtype=float)
+        return np.where(np.isfinite(ratio), np.minimum(1.0, ratio + BROKER_MARGIN_ADDON), 1.0)
+
+    client = bars.client_limit.to_numpy(float)
+    client_ok = np.isfinite(client)
+    limit = np.where(client_ok, np.maximum(0, np.floor(np.where(client_ok, client, 0))), 10**9).astype(np.int64)
+    return {
+        "long_margin": margin(ratio_long).tolist(),
+        "short_margin": margin(ratio_short).tolist(),
+        "by_lot": bars.commission_type.eq("by_volume").fillna(False).to_numpy(bool).tolist(),
+        "min_order": positive(np.ceil(bars.min_order_quantity.to_numpy(float)), 1).tolist(),
+        "max_order": positive(bars.max_order_quantity.to_numpy(float), 10**9).tolist(),
+        "limit": limit.tolist(),
+        "open_cap": np.where(opening, volume_cap, 0).tolist(),
+        "exit_cap": np.maximum(0, volume_cap).tolist(),
+    }
+
+
 def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path = PARAMETER_CACHE,
                 flat_margin: float | None = None, partition: str = "research"):
     """交易参数与合约日线对齐，成交量容量仅使用截至前日的数据。"""
@@ -131,30 +194,11 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
     price_limits = []
     specifications = []
     for contract in sorted(names):
-        path = root / f"{contract}.pkl"
-        if partition == "research":
-            C.assert_research_only(path)
-        if path.is_file():
-            table = pd.read_pickle(path)
-            check_dates(table.index, f"{contract} 交易参数")
-            if not table.empty:
-                tables.append(table.rename_axis("date").reset_index().assign(contract=contract))
-        path = root.parent / "price_limits" / f"{contract}.pkl"
-        if partition == "research":
-            C.assert_research_only(path)
-        if path.is_file():
-            table = pd.read_pickle(path)
-            check_dates(table.index, f"{contract} 涨跌停价")
-            if not table.empty:
-                price_limits.append(table.rename_axis("date").reset_index().assign(contract=contract))
-        path = root.parent / "specifications" / f"{contract}.pkl"
-        if partition == "research":
-            C.assert_research_only(path)
-        if path.is_file():
-            table = pd.read_pickle(path)
-            check_dates(table.index, f"{contract} 合约规格")
-            if not table.empty:
-                specifications.append(table.rename_axis("date").reset_index().assign(contract=contract))
+        for folder, what, out in ((root, "交易参数", tables), (root.parent / "price_limits", "涨跌停价", price_limits),
+                                  (root.parent / "specifications", "合约规格", specifications)):
+            table = _contract_table(folder / f"{contract}.pkl", contract, partition, check_dates, what)
+            if table is not None:
+                out.append(table)
     if not tables:
         raise RuntimeError("历史执行参数为空")
     actual = pd.concat(tables, ignore_index=True)
@@ -200,35 +244,16 @@ def load_market(bars: pd.DataFrame, fees: pd.DataFrame, ids, start, root: Path =
     bars = bars.reset_index()
     bars = bars.loc[bars.date.ge(start)]
     market = {}
-    for row in bars.itertuples(index=False):
-        ratio_long = row.long_margin_ratio if 0 < row.long_margin_ratio <= 1 else np.nan
-        ratio_short = row.short_margin_ratio if 0 < row.short_margin_ratio <= 1 else np.nan
-        known_margin = isfinite(ratio_long) and isfinite(ratio_short)
-        known_limits = (isfinite(row.limit_up) and row.limit_up > 0 and
-                        isfinite(row.limit_down) and row.limit_down > 0)
-        volume_cap = floor(row.prior_volume * VOLUME_FRACTION) if np.isfinite(row.prior_volume) else 0
-        opening_cap = volume_cap
-        if (row.commission_type not in ("by_volume", "by_money") or not known_margin
-                or not known_limits or pd.isna(row.last_trading_date)):
-            opening_cap = 0
-        max_order = _positive_int(row.max_order_quantity, 10**9)
-        min_order = _positive_int(np.ceil(row.min_order_quantity), 1)
-        long_margin = flat_margin if flat_margin is not None else (
-            min(1.0, ratio_long + BROKER_MARGIN_ADDON) if isfinite(ratio_long) else 1.0
-        )
-        short_margin = flat_margin if flat_margin is not None else (
-            min(1.0, ratio_short + BROKER_MARGIN_ADDON) if isfinite(ratio_short) else 1.0
-        )
-        market.setdefault(row.date, {})[row.contract] = Quote(
-            row.open, row.settlement, row.contract_multiplier, row.tick_size,
-            long_margin,
-            short_margin,
-            row.commission_type == "by_volume",
-            row.open_commission, row.close_commission,
-            min_order, max_order, max(0, floor(row.client_limit)) if isfinite(row.client_limit) else 10**9,
-            opening_cap, row.fee_fallback, max(0, volume_cap), row.limit_up, row.limit_down,
-            row.fee_source_date, row.fee_carried,
-            row.fee_source_contract, row.fee_cross_contract,
-            row.last_trading_date, row.start_delivery_date,
-        )
+    derived = _quote_fields(bars, flat_margin)
+    columns = (
+        bars.open, bars.settlement, bars.contract_multiplier, bars.tick_size,
+        derived["long_margin"], derived["short_margin"], derived["by_lot"],
+        bars.open_commission, bars.close_commission,
+        derived["min_order"], derived["max_order"], derived["limit"],
+        derived["open_cap"], bars.fee_fallback, derived["exit_cap"], bars.limit_up, bars.limit_down,
+        bars.fee_source_date, bars.fee_carried, bars.fee_source_contract, bars.fee_cross_contract,
+        bars.last_trading_date, bars.start_delivery_date,
+    )
+    for day, contract, *fields in zip(bars.date, bars.contract, *columns):
+        market.setdefault(day, {})[contract] = Quote(*fields)
     return market

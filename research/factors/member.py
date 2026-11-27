@@ -136,7 +136,23 @@ def load_extension_inputs(panel: pd.DataFrame, start: pd.Timestamp, jobs: int, p
     return _load_member_signals(panel, start, partition, jobs, extension=names)
 
 
+_SIGNAL_CACHE: list[tuple[pd.DataFrame, tuple, dict[str, pd.DataFrame], pd.DataFrame]] = []
+_SIGNAL_CACHE_SIZE = 4
+
+
 def _load_member_signals(panel, start, partition, jobs, *, extension: tuple[str, ...] = ()):
+    """同一进程内，同一面板对象、开户日、分区和因子列表的结果直接复用（返回副本）。"""
+    key = (pd.Timestamp(start), partition, tuple(extension))
+    for cached_panel, cached_key, signals, dominant in _SIGNAL_CACHE:
+        if cached_panel is panel and cached_key == key:
+            return {name: value.copy() for name, value in signals.items()}, dominant.copy()
+    signals, dominant = _compute_member_signals(panel, start, partition, jobs, extension=tuple(extension))
+    _SIGNAL_CACHE.append((panel, key, signals, dominant))
+    del _SIGNAL_CACHE[:-_SIGNAL_CACHE_SIZE]
+    return {name: value.copy() for name, value in signals.items()}, dominant.copy()
+
+
+def _compute_member_signals(panel, start, partition, jobs, *, extension: tuple[str, ...] = ()):
     from joblib import Parallel, delayed
 
     start = pd.Timestamp(start)
@@ -155,7 +171,7 @@ def _load_member_signals(panel, start, partition, jobs, *, extension: tuple[str,
         market = pd.DataFrame({"volume": volume[symbol], "oi": oi[symbol]}, index=eligible.index)
         result = sticky_net_share(tables, market)[["STICKY_NET_SHARE"]]
         if extension:
-            ext = extension_factors(tables, market)
+            ext = extension_factors(tables, market, names=extension)
             for col in extension:
                 result[col] = ext[col]
         return result
@@ -568,52 +584,72 @@ def sticky_composition(tables: dict[str, pd.DataFrame], market: pd.DataFrame) ->
 
 
 def extension_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame,
-                      returns: pd.Series | None = None) -> pd.DataFrame:
+                      returns: pd.Series | None = None, names: tuple[str, ...] | None = None) -> pd.DataFrame:
     """事前冻结的粘性净多扩展因子。returns[d] 为 d 日开盘到 d+1 日开盘、按 d-1 收盘主力计算的收益；
-    省略时 SEAT_SKILL_NET 为缺失。"""
+    省略时 SEAT_SKILL_NET 为缺失。names 只决定计算哪些列，不改变任何一列的数值；省略时计算全部。"""
+    from functools import cache
+
     t, m, valid = _aligned_tables(tables, market)
     index = m.index
     net, gross, sticky, _ = seat_turnover_groups(t, m)
     held = gross.gt(0) & t["ranked"].to_numpy()[:, None]
-    base = net_gross_share(net, gross, sticky).where(valid)
 
-    seat_turnover = t["V"] / gross.where(gross.gt(0))
-    listed = held & t["V"].notna()
-    peer_median = seat_turnover.where(listed).median(axis=1)
-    sticky_top20 = held & ~(listed & seat_turnover.ge(peer_median, axis=0))
+    @cache
+    def base():
+        return net_gross_share(net, gross, sticky).where(valid)
 
-    prior = base.shift(1).rolling(250, min_periods=60)
-    z = (base - prior.mean()) / prior.std().where(lambda value: value.gt(0))
+    def sticky_top20():
+        seat_turnover = t["V"] / gross.where(gross.gt(0))
+        listed = held & t["V"].notna()
+        peer_median = seat_turnover.where(listed).median(axis=1)
+        return net_gross_share(net, gross, held & ~(listed & seat_turnover.ge(peer_median, axis=0)))
 
-    long_expected = sticky & t["L"].notna()
-    short_expected = sticky & t["S"].notna()
-    complete = ((~long_expected | t["dL"].notna()) & (~short_expected | t["dS"].notna())).all(axis=1)
-    sticky_change = t["dL"].where(long_expected).sum(axis=1) - t["dS"].where(short_expected).sum(axis=1)
-    flow = (sticky_change / m["oi"].where(m["oi"].gt(0))).where(complete & sticky.any(axis=1))
+    def z250():
+        prior = base().shift(1).rolling(250, min_periods=60)
+        return (base() - prior.mean()) / prior.std().where(lambda value: value.gt(0))
 
-    held_days = held.astype(float).shift(1).rolling(242, min_periods=120).sum()
-    sticky_days = (sticky & held).astype(float).shift(1).rolling(242, min_periods=120).sum()
-    identity = held & (sticky_days / held_days.where(held_days.ge(60))).ge(0.8)
+    @cache
+    def flow():
+        long_expected = sticky & t["L"].notna()
+        short_expected = sticky & t["S"].notna()
+        complete = ((~long_expected | t["dL"].notna()) & (~short_expected | t["dS"].notna())).all(axis=1)
+        sticky_change = t["dL"].where(long_expected).sum(axis=1) - t["dS"].where(short_expected).sum(axis=1)
+        return (sticky_change / m["oi"].where(m["oi"].gt(0))).where(complete & sticky.any(axis=1))
 
-    ret = pd.Series(np.nan, index=index) if returns is None else returns.reindex(index)
-    hit = np.sign(net.where(held)).shift(1).mul(ret, axis=0)
-    skill = hit.shift(1).rolling(242, min_periods=60).mean()
-    skilled = held & skill.gt(0)
+    @cache
+    def identity():
+        held_days = held.astype(float).shift(1).rolling(242, min_periods=120).sum()
+        sticky_days = (sticky & held).astype(float).shift(1).rolling(242, min_periods=120).sum()
+        return held & (sticky_days / held_days.where(held_days.ge(60))).ge(0.8)
 
-    out = {
+    def skill_net():
+        ret = pd.Series(np.nan, index=index) if returns is None else returns.reindex(index)
+        hit = np.sign(net.where(held)).shift(1).mul(ret, axis=0)
+        skill = hit.shift(1).rolling(242, min_periods=60).mean()
+        return net_gross_share(net, gross, held & skill.gt(0))
+
+    builders = {
         "STICKY_NET_SHARE": base,
-        "STICKY_TOP20": net_gross_share(net, gross, sticky_top20),
-        "STICKY_Z250": z,
-        "STICKY_CHG20": base - base.shift(20),
+        "STICKY_TOP20": sticky_top20,
+        "STICKY_Z250": z250,
+        "STICKY_CHG20": lambda: base() - base().shift(20),
         "STICKY_FLOW": flow,
-        "STICKY_IDENTITY": net_gross_share(net, gross, identity),
-        "SEAT_SKILL_NET": net_gross_share(net, gross, skilled),
-        "STICKY_PERSIST_IDENTITY": net_gross_share(net, gross, identity & _persist_mask(t, net, held)),
-        "STICKY_FLOW5": flow.where(valid).rolling(5, min_periods=5).mean(),
-        "STICKY_FLOW10": flow.where(valid).rolling(10, min_periods=10).mean(),
+        "STICKY_IDENTITY": lambda: net_gross_share(net, gross, identity()),
+        "SEAT_SKILL_NET": skill_net,
+        "STICKY_PERSIST_IDENTITY": lambda: net_gross_share(net, gross, identity() & _persist_mask(t, net, held)),
+        "STICKY_FLOW5": lambda: flow().where(valid).rolling(5, min_periods=5).mean(),
+        "STICKY_FLOW10": lambda: flow().where(valid).rolling(10, min_periods=10).mean(),
     }
-    crowd = crowding({key: t[key] for key in ("L", "S", "V")}, m)[list(CROWDING_META)]
-    return pd.concat([pd.DataFrame(out, index=index), crowd], axis=1).where(valid, axis=0)
+    wanted = [*builders, *CROWDING_META] if names is None else list(names)
+    unknown = sorted(set(wanted) - set(builders) - set(CROWDING_META))
+    if unknown:
+        raise KeyError(f"未知扩展因子: {unknown}")
+    frame = pd.DataFrame({name: builders[name]() for name in wanted if name in builders}, index=index)
+    crowd_names = [name for name in wanted if name in CROWDING_META]
+    if crowd_names:
+        crowd = crowding({key: t[key] for key in ("L", "S", "V")}, m)[crowd_names]
+        frame = pd.concat([frame, crowd], axis=1)
+    return frame[wanted].where(valid, axis=0)
 
 
 def redefinition_factors(tables: dict[str, pd.DataFrame], market: pd.DataFrame) -> pd.DataFrame:

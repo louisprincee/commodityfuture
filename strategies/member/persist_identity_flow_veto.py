@@ -16,6 +16,22 @@ STRATEGY_ID = "persist_identity_flow_veto"
 MAIN_BOOK = "PERSIST_IDENTITY_FLOW_VETO"
 LABEL = "持久身份 + 持仓流否决"
 EQUITY_CURVE_FILE = "equity_curves.csv"
+CONTROL_BOOK = "PERSIST_IDENTITY"
+OOS_PROTOCOL = {
+    "declared": "2026-11-27, at the user's explicit request, before any 2022-2025 result of this strategy was computed",
+    "rule": "Frozen as committed in f2d9627: STICKY_PERSIST_IDENTITY 10% tails, STICKY_FLOW5 veto at percentile "
+            f"{GATE_VETO:.2f} / {1 - GATE_VETO:.2f}, missing flow never vetoes, vetoed slots not refilled, "
+            f"{HORIZON}-session overlapping cohorts, target multiplier 2, unchanged costs and non-delivery execution.",
+    "window": "Independent OOS account 2022-01-01..2025-12-31 with research-period warm-up, as for the other active "
+              "strategies; the 2011-2025 continuous account is descriptive only.",
+    "primary": f"One test: OOS daily net return {MAIN_BOOK} minus {CONTROL_BOOK}, one tick, two-sided HAC 20 lags, "
+               "alpha .05. Both books come from the same OOS run.",
+    "secondary": "Descriptive only: each book's net annual return, Sharpe, max drawdown, turnover; volatility-matched "
+                 "gain; turnover ratio; two ticks saved, not reported in tables.",
+    "caveats": "The veto rule was chosen after the research-period gate study. The PERSIST_IDENTITY and 1:1 "
+               "identity+flow OOS results were read before this declaration.",
+    "no_revision": "After reading, no change to signs, windows, veto percentile, slot rules, holding days or leverage.",
+}
 
 
 def build_targets(panel: pd.DataFrame, _bars: pd.DataFrame, start: pd.Timestamp,

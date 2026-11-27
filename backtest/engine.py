@@ -626,7 +626,8 @@ BOOK_LABELS = {
 # member_price 只保留源码与各自单策略图，不进对比。
 COMPARED = [module.STRATEGY_ID for module in FAMILIES["member"]]
 # 尚无样本外评价协议的现役策略：只运行研究期；--oos 与 2011–2025 跳过，不读 2022–2025。
-RESEARCH_ONLY = {persist_identity_flow_veto.STRATEGY_ID}
+# persist_identity_flow_veto 已于 2026-11-27 声明 OOS_PROTOCOL 后移出。
+RESEARCH_ONLY: set[str] = set()
 PERIOD_LABELS = {"research": "研究期 2011–2021", "legacy_research": "旧研究期 2016–2021", "oos": "样本外 2022–2025"}
 def partition_directory_name(partition: str) -> str:
     if partition == "combined":

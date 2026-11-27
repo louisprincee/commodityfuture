@@ -19,7 +19,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider
 - `research.member.extensions`：展示保留的粘性身份、持仓流及 5 日平滑因子。当前 CSV 与图仅包含保留因子，完整原检验族保存于对应研究目录的 `history/`，校正值不因展示筛选而重算。
 - `backtest.engine --research` / `--oos` / `--start 2011 --end 2025`：用统一的非交割执行与历史手续费重跑现役策略及等权基准。每个策略单独存放于 `runs/strategies/<策略>/{research,oos,2011-2025}/`，基准在 `runs/strategies/benchmark/`，纯会员策略都在运行范围内时另写 `runs/strategies/comparison/`。
 - `backtest.engine persist_identity --research`：运行持久粘性身份策略，只要求自身信号有效。结果保存在 `runs/strategies/persist_identity/`。
-- `backtest.engine persist_identity_flow_veto --research`：持久粘性身份的同一候选与两端选样，5 日持仓流只否决开仓。尚无样本外评价协议，`--oos` 与 `--start 2011 --end 2025` 会跳过它（单独指定时报错）。
+- `backtest.engine persist_identity_flow_veto --research`：持久粘性身份的同一候选与两端选样，5 日持仓流只否决开仓。样本外协议写在策略文件的 `OOS_PROTOCOL`，2026-11-27 已按该协议读取 2022–2025。
 - `backtest.engine --research --identity-gate-study`：研究期的身份 + 持仓流否决 / 缓冲对照实验，结果在 `runs/strategies/identity_flow_gate/research/`。
 - `backtest.engine sticky_basis_skew --research`：运行粘性净多、基差动量与负偏度的等权排名组合。持有天数只在 `strategies/member_price/sticky_basis_skew.py` 顶部的 `HOLDING_DAYS` 修改，默认 10 日；非默认持有期结果写入 `holding_<天数>/`。该策略不进入对比图或报告绩效表。
 - `backtest.engine --start 2016 --end 2021`：旧研究期入口，结果写入各策略的 `legacy_research/`。

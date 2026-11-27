@@ -4,6 +4,8 @@
 
 ## 2026-11-26
 
+- **活跃报告与图表按保留名单收敛（用户要求）**：删除活跃报告中低调仓强度、单独低净敞口过滤、榜内换手门槛、z 分数、20 日变化、历史表现筛选、拥挤度/一致性/蜘蛛网、全榜净多及已止步组合的定义、行、图与解释。保留原粘性净多、高换手与插补对照、持仓流残差、持久同向及净敞口敏感性对照、长期身份、持久长期身份、原始及 5 日平滑持仓流。重画三张相关 IC 图；完整原检验族先保存到各研究目录 `history/`，当前 CSV 再导出保留行，q 值原样承接，不重划检验族。旧拥挤度与组合图也移入历史目录，不再由默认入口绘制或在活跃报告展示。研究期 5/10 日组合实验和先前检验记录保留于历史记录，现役策略及账户结果不变。
+
 - **`runs/` 顶层元数据归入 `meta/`**：`evaluation_protocol.json`、`execution_audit.csv`、`manifest.json` 移至 `runs/meta/`；活跃报告链接同步更新。
 - **三套策略按因子规则重命名**：`sticky_only` → `sticky_net`（账本 `STICKY_NET`）、`sticky_identity` → `persist_identity`（账本 `PERSIST_IDENTITY`）、`sticky_basis_momentum_neg_skew` → `sticky_basis_skew`（账本 `STICKY_BASIS_SKEW`）。因子名 `STICKY_NET_SHARE`、`STICKY_PERSIST_IDENTITY` 等不变；结果目录同步更名，对比图改用中文标签。样本外对比图改为与研究期同款总览版式，坐标按整年刻度。
 - **2016 年前后符号切换诊断图**：`member_review` 新增粘性组构成的逐年统计与图（未上成交榜席位占比、粘性持仓占比，并对照两组 10 日 IC），只使用持仓与成交榜，不涉及收益。

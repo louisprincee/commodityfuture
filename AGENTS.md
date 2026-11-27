@@ -67,6 +67,8 @@ Do not invent a record the vendor does not have, and do not rewrite a published 
 `docs/research.md` is the only active report. Change a table and its CSV together.
 Limit future report content to member-position research and the evaluation of member-position signals.
 
+The active report, its CSV views, and plots show retained factors and active accounts only. Preserve complete predeclared test-family records in each research output's history/ directory, and select displayed rows only after computing the original family corrections. Do not reinsert retired-factor explanations or figures into the active report.
+
 Add no dependency without asking. Automated tests use synthetic data only and do not read real market files.
 
 ## Temporary files and caches

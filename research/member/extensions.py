@@ -1,5 +1,5 @@
-"""粘性净多扩展研究（2011–2021，2010 预热）：榜内换手门槛、品种内标准化与变化、粘性席位持仓流、
-席位身份与历史记录，以及拥挤度三因子的截面与时序 IC。
+"""当前粘性净多、持仓流与身份因子研究（2011–2021，2010 预热）。
+完整原检验族保存在 history/，活跃表格和图形仅展示保留因子。
 
 规格、符号与检验族在看到结果之前写入 PROTOCOL。只计算因子与 IC，不构造仓位。
 """
@@ -21,8 +21,8 @@ from research.factors.member import (
 from research.ic.statistics import fixed_bh, mean_inference, rank_corr, rank_residual
 from research.ic.study import forward_returns, return_matrix
 from research.member.review import (
-    END, HORIZONS, MIN_DAYS, MIN_NAMES, PERIODS, START, _FONTS, _GRID, _INK, _MUTED, _SURFACE,
-    evaluate_factors, plot_redefinition_ic,
+    END, HORIZONS, MIN_DAYS, MIN_NAMES, PERIODS, START,
+    evaluate_factors, plot_redefinition_ic, save_factor_view,
 )
 
 OUT_NAME = "member_extensions"
@@ -81,22 +81,16 @@ COMBO_PROTOCOL = {
                        "daily IC correlation and mean cross-sectional factor correlation of the components",
     "exploratory": True,
 }
-COMBO_SERIES = (
+FOLLOWUP_SERIES = (
     (BASELINE, "原粘性净多（基线）", "#7a8a96"),
     ("STICKY_PERSIST_IDENTITY", "持久长期粘性身份", "#B76569"),
-    ("STICKY_FLOW5", "粘性席位持仓流 · 5 日平滑", "#5B8FA8"),
-    (COMBO, "身份 + 持仓流等权组合", "#147D89"),
+    ("STICKY_FLOW5", "粘性持仓流 · 5 日平滑", "#5B8FA8"),
 )
 EXTENSION_SERIES = (
     (BASELINE, "原粘性净多（基线）", "#7a8a96"),
-    ("STICKY_TOP20", "榜内换手门槛粘性", "#147D89"),
-    ("STICKY_Z250", "粘性净多 · 品种内 z 分数", "#C27D4E"),
-    ("STICKY_CHG20", "粘性净多 · 20 日变化", "#B76569"),
     ("STICKY_FLOW", "粘性席位持仓流", "#5B8FA8"),
     ("STICKY_IDENTITY", "长期粘性身份席位", "#6E9C7B"),
-    ("SEAT_SKILL_NET", "历史记录为正的席位", "#8D83B5"),
 )
-CROWD_COLORS = {"CROWD1": "#147D89", "CROWD2": "#C27D4E", "CROWD3": "#8D83B5"}
 
 
 def build_inputs(jobs: int, extra_names: tuple[str, ...] = ()):
@@ -176,114 +170,54 @@ def timeseries_summary(ts: pd.DataFrame) -> pd.DataFrame:
     }).reset_index()
 
 
-def plot_crowding(daily: pd.DataFrame, summary: pd.DataFrame, ts_summary: pd.DataFrame, output: Path) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.dates as mdates
-    import matplotlib.pyplot as plt
-
-    full = daily.loc[daily.period.eq("2011-2021")]
-    with plt.rc_context({**_FONTS, "text.color": _INK, "axes.labelcolor": _MUTED,
-                         "xtick.color": _MUTED, "ytick.color": _MUTED}):
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.6, 5.4), facecolor=_SURFACE,
-                                       gridspec_kw={"width_ratios": [1.35, 1.0]})
-        for axis in (ax1, ax2):
-            axis.set_facecolor(_SURFACE)
-            axis.spines[["top", "right"]].set_visible(False)
-            axis.spines[["left", "bottom"]].set_color("#d7e0e6")
-            axis.tick_params(length=0, labelsize=9)
-        ax1.axvspan(full.date.min(), pd.Timestamp("2016-01-04"), color="#f1efea", zorder=0, lw=0)
-        ax1.axhline(0, color="#b9b7b0", lw=.8)
-        for name, color in CROWD_COLORS.items():
-            for h, style in ((1, "-"), (5, "--")):
-                ic = full.loc[full.factor.eq(name) & full.horizon.eq(h)].set_index("date")["ic"].dropna()
-                ax1.plot(ic.index, ic.cumsum(), color=color, ls=style, lw=1.8, label=f"{name} · {h} 日")
-        ax1.set_title("累计截面 IC（已按反转方向取号）· 灰底为 2011–2015", loc="left", fontsize=11.5, fontweight="bold", pad=10)
-        ax1.set_ylabel("累计 IC（逐日均值之和）", fontsize=9.5)
-        ax1.legend(loc="lower left", frameon=False, fontsize=8.6, ncol=2)
-        ax1.grid(axis="y", color=_GRID, lw=.7)
-        ax1.xaxis.set_major_locator(mdates.YearLocator(2))
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-
-        xs = summary.loc[summary.period.eq("2011-2021")].set_index(["factor", "horizon"])
-        ts = ts_summary.loc[ts_summary.period.eq("2011-2021")].set_index(["factor", "horizon"])
-        bars = [("截面 1 日", xs, 1, "mean_ic", "#147D89"), ("截面 5 日", xs, 5, "mean_ic", "#5B8FA8"),
-                ("时序 1 日（品种均值）", ts, 1, "mean_ts_ic", "#C27D4E"),
-                ("时序 5 日（品种均值）", ts, 5, "mean_ts_ic", "#E0A878")]
-        height = .8 / len(bars)
-        for i, (label, table, h, column, color) in enumerate(bars):
-            for j, name in enumerate(CROWD_COLORS):
-                value = float(table.loc[(name, h), column])
-                y = j + (i - (len(bars) - 1) / 2) * height
-                ax2.barh(y, value, height=height * .9, color=color, label=label if j == 0 else None)
-                tag = f"{value:+.4f}"
-                if table is xs and xs.loc[(name, h), "p"] < .05:
-                    tag += "*"
-                ax2.annotate(tag, (value, y), xytext=(4 if value >= 0 else -4, 0), textcoords="offset points",
-                             ha="left" if value >= 0 else "right", va="center", fontsize=8)
-        ax2.axvline(0, color="#9aa8b2", lw=.8)
-        ax2.set_yticks(range(len(CROWD_COLORS)), list(CROWD_COLORS))
-        ax2.invert_yaxis()
-        span = max(.02, float(np.nanmax(np.abs([*xs["mean_ic"], *ts["mean_ts_ic"]]))) * 1.6)
-        ax2.set_xlim(-span, span)
-        ax2.set_title("2011–2021 平均 IC（* 为截面 p < 0.05）", loc="left", fontsize=11.5, fontweight="bold", pad=10)
-        ax2.set_xlabel("平均 Spearman IC", fontsize=9.5)
-        ax2.legend(loc="lower right", frameon=False, fontsize=8.4)
-        ax2.grid(axis="x", color=_GRID, lw=.7)
-        fig.text(.018, .95, "拥挤度三因子 · 截面与时序 IC · 2011–2021", fontsize=14.5, fontweight="bold")
-        fig.tight_layout(rect=(0, 0, 1, .91), w_pad=2.8)
-        fig.savefig(output, dpi=180, facecolor=_SURFACE)
-        plt.close(fig)
-
-
 def run(out: Path, jobs: int = 8) -> None:
     C.assert_research_only(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "protocol.json").write_text(json.dumps(PROTOCOL, ensure_ascii=False, indent=2))
+    history = out / "history"
+    history.mkdir(parents=True, exist_ok=True)
     scores, labels = build_inputs(jobs)
 
     extension = {name: scores[name] for name in (BASELINE, *EXTENSION_META)}
     summary, daily, ts = evaluate_factors(extension, labels, {**BASELINE_META, **EXTENSION_META})
-    summary.to_csv(out / "extension_ic.csv", index=False)
-    ts.to_csv(out / "extension_timeseries_ic.csv", index=False)
-    timeseries_summary(ts).to_csv(out / "extension_timeseries_summary.csv", index=False)
-    residual_incremental(scores, labels).to_csv(out / "extension_residual_ic.csv", index=False)
+    retained = [name for name, _, _ in EXTENSION_SERIES]
+    summary = save_factor_view(summary, out, "extension_ic.csv", retained)
+    save_factor_view(ts, out, "extension_timeseries_ic.csv", retained)
+    save_factor_view(timeseries_summary(ts), out, "extension_timeseries_summary.csv", retained)
+    save_factor_view(residual_incremental(scores, labels), out, "extension_residual_ic.csv", retained)
     plot_redefinition_ic(daily, summary, out / "extension_ic.png", series=EXTENSION_SERIES,
                          title="粘性净多扩展因子 · 2011–2021")
 
     crowd = {name: scores[name] for name in CROWDING_META}
     c_summary, c_daily, c_ts = evaluate_factors(crowd, {h: labels[h] for h in (1, 5)}, CROWDING_META)
     c_ts_summary = timeseries_summary(c_ts)
-    c_summary.to_csv(out / "crowding_ic.csv", index=False)
-    c_ts.to_csv(out / "crowding_timeseries_ic.csv", index=False)
-    c_ts_summary.to_csv(out / "crowding_timeseries_summary.csv", index=False)
-    plot_crowding(c_daily, c_summary, c_ts_summary, out / "crowding_ic.png")
+    c_summary.to_csv(history / "crowding_ic.csv", index=False)
+    c_ts.to_csv(history / "crowding_timeseries_ic.csv", index=False)
+    c_ts_summary.to_csv(history / "crowding_timeseries_summary.csv", index=False)
 
     (out / "followup_protocol.json").write_text(json.dumps(FOLLOWUP_PROTOCOL, ensure_ascii=False, indent=2))
     followup = {name: scores[name] for name in (BASELINE, *FOLLOWUP_META)}
-    f_summary, _, f_ts = evaluate_factors(followup, labels, {**BASELINE_META, **FOLLOWUP_META})
+    f_summary, f_daily, f_ts = evaluate_factors(followup, labels, {**BASELINE_META, **FOLLOWUP_META})
     f_summary.to_csv(out / "followup_ic.csv", index=False)
     f_ts.to_csv(out / "followup_timeseries_ic.csv", index=False)
     timeseries_summary(f_ts).to_csv(out / "followup_timeseries_summary.csv", index=False)
     residual_incremental(scores, labels, tuple(FOLLOWUP_META)).to_csv(out / "followup_residual_ic.csv", index=False)
+    plot_redefinition_ic(f_daily, f_summary, out / "followup_ic.png", series=FOLLOWUP_SERIES,
+                         title="持久长期粘性身份与持仓流 · 2011–2021", bar_legend="upper right")
 
-    (out / "combo_protocol.json").write_text(json.dumps(COMBO_PROTOCOL, ensure_ascii=False, indent=2))
+    (history / "combo_protocol.json").write_text(json.dumps(COMBO_PROTOCOL, ensure_ascii=False, indent=2))
     combo = {BASELINE: scores[BASELINE], **{name: scores[name] for name in COMBO_PARTS},
              COMBO: rank_composite(*(scores[name] for name in COMBO_PARTS))}
     k_summary, k_daily, k_ts = evaluate_factors(combo, labels, {**BASELINE_META, **COMBO_META})
-    k_summary.to_csv(out / "combo_ic.csv", index=False)
-    k_ts.to_csv(out / "combo_timeseries_ic.csv", index=False)
-    timeseries_summary(k_ts).to_csv(out / "combo_timeseries_summary.csv", index=False)
+    k_summary.to_csv(history / "combo_ic.csv", index=False)
+    k_ts.to_csv(history / "combo_timeseries_ic.csv", index=False)
+    timeseries_summary(k_ts).to_csv(history / "combo_timeseries_summary.csv", index=False)
     diagnostics = combo_diagnostics(combo, k_daily)
-    diagnostics.to_csv(out / "combo_diagnostics.csv", index=False)
-    plot_redefinition_ic(k_daily, k_summary, out / "combo_ic.png", series=COMBO_SERIES,
-                         title="持久长期粘性身份与粘性席位持仓流的等权组合 · 2011–2021", bar_legend="upper right")
+    diagnostics.to_csv(history / "combo_diagnostics.csv", index=False)
 
     columns = ["factor", "horizon", "mean_ic", "p", "q_primary", "q_all", "days"]
-    print(diagnostics.round(4).to_string(index=False))
-    for table in (summary, f_summary, k_summary):
+    for table in (summary, f_summary):
         print(table.loc[table.period.eq("2011-2021") & table.horizon.eq(10), columns].round(5).to_string(index=False))
-    print(c_summary.loc[c_summary.period.eq("2011-2021"), columns].round(5).to_string(index=False))
 
 
 def run_smoothing_study(out: Path, jobs: int) -> None:

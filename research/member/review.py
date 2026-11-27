@@ -283,16 +283,24 @@ def evaluate_redefinitions(redefs: dict[str, pd.DataFrame], labels: dict[int, pd
 
 REDEFINITION_SERIES = (
     ('STICKY_NET_SHARE', '原粘性净多（基线）', '#7a8a96'),
-    ('STICKY_PERSIST', '持久同向粘性（20日>=15日）', '#147D89'),
-    ('STICKY_LOW_ADJUST', '低换仓强度粘性（5日调仓<=中位）', '#C27D4E'),
-    ('STICKY_UNILATERAL', '去双边对锁粘性', '#5B8FA8'),
-    ('STICKY_PERSIST_PURE', '持久+去对锁粘性', '#6E9C7B'),
+    ('STICKY_PERSIST', '持久同向（20日有效观测）', '#147D89'),
+    ('STICKY_PERSIST_PURE', '持久同向 · 净敞口过滤对照', '#6E9C7B'),
 )
+
+
+def save_factor_view(table: pd.DataFrame, out: Path, filename: str, retained) -> pd.DataFrame:
+    """先保存完整检验族，再导出保留行；沿用原 q 值，不重新进行多重校正。"""
+    history = out / 'history'
+    history.mkdir(parents=True, exist_ok=True)
+    table.to_csv(history / filename, index=False)
+    selected = table.loc[table.factor.isin(retained)].copy()
+    selected.to_csv(out / filename, index=False)
+    return selected
 
 
 def plot_redefinition_ic(daily: pd.DataFrame, summary: pd.DataFrame, output: Path, split: str = '2016-01-04',
                          series=REDEFINITION_SERIES,
-                         title: str = '粘性席位新定义探索 · 2011–2021（不含成交榜截尾的替代口径）',
+                         title: str = '持久同向与净敞口对照 · 2011–2021',
                          bar_legend: str = 'lower right') -> None:
     import matplotlib
     matplotlib.use('Agg')
@@ -459,8 +467,9 @@ def run(out, jobs=4):
     yearly.to_csv(out / 'sticky_composition_by_year.csv', index=False)
     plot_composition(yearly, out / 'sticky_composition.png')
     redef_summary, redef_daily, redef_gains = evaluate_redefinitions(redefs, labels)
-    redef_summary.to_csv(out / 'seat_redefinition_ic.csv', index=False)
-    redef_gains.to_csv(out / 'seat_redefinition_gains.csv', index=False)
+    retained = [name for name, _, _ in REDEFINITION_SERIES]
+    redef_summary = save_factor_view(redef_summary, out, 'seat_redefinition_ic.csv', retained)
+    save_factor_view(redef_gains, out, 'seat_redefinition_gains.csv', retained)
     plot_redefinition_ic(redef_daily, redef_summary, out / 'seat_redefinition_ic.png')
     retained_profile_summary(scores, labels).to_csv(out / 'retained_profile_evidence.csv', index=False)
     print(summary.loc[summary.period.eq('2011-2021') & summary.horizon.eq(10),

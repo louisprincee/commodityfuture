@@ -367,13 +367,20 @@ def test_rank_time_series_has_same_spearman_estimate_and_hac_inference():
     assert np.isnan(rank_time_series(x.iloc[:30], y.iloc[:30], 20)['ic'])
 
 
-def test_fixed_bh_preserves_unavailable_hypotheses():
+def test_fixed_bh_preserves_unavailable_hypotheses(tmp_path):
     from research.ic.statistics import fixed_bh
 
     out = fixed_bh(pd.Series([.01, np.nan, .04]))
     assert out.iloc[0] == pytest.approx(.03)
     assert out.iloc[2] == pytest.approx(.06)
     assert pd.isna(out.iloc[1])
+    from research.member.review import save_factor_view
+    full = pd.DataFrame({"factor": ["retained", "retired"], "q_primary": [.06, .001]})
+    view = save_factor_view(full, tmp_path, 'ic.csv', {'retained'})
+    assert view.factor.tolist() == ['retained']
+    assert view.q_primary.tolist() == [.06]
+    assert pd.read_csv(tmp_path / 'ic.csv').factor.tolist() == ['retained']
+    pd.testing.assert_frame_equal(pd.read_csv(tmp_path / 'history/ic.csv'), full)
 
 
 def test_imputation_comparison_uses_same_pairs_within_each_group():
